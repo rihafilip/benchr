@@ -1,0 +1,68 @@
+parameters = ["Rpath"]
+
+[default]
+iterations = 20
+example-iterations = 15
+parser = "ReBench"
+
+[matrix]
+machines = ["x86_64-linux", "x86_64-windows"]
+
+
+[default.env]
+LC_CTYPE = "en_US.UTF-8"
+LC_TIME = "en_US.UTF-8"
+LC_MONETARY = "en_US.UTF-8"
+LC_PAPER = "en_US.UTF-8"
+LC_ADDRESS = "C"
+LC_MEASUREMENT = "en_US.UTF-8"
+LC_NUMERIC = "C"
+LC_COLLATE = "en_US.UTF-8"
+LC_MESSAGES = "en_US.UTF-8"
+LC_NAME = "C"
+LC_TELEPHONE = "C"
+LC_IDENTIFICATION = "C"
+
+[variables]
+benchmarks = '{cwd}/benchmarks'
+
+[suites.areWeFast]
+working_directory = '{benchmarks}/areWeFast'
+command = [
+  "{Rpath}/bin/Rscript",
+  "harness.r",
+  "{benchmark}",
+  "{iterations}",
+  "{extra}",
+]
+[[suites.areWeFast.benchmarks]]
+name = "Mandelbrot"
+extra = 500
+[[suites.areWeFast.benchmarks]]
+name = "Bounce"
+extra = 35
+[[suites.areWeFast.benchmarks]]
+name = "Bounce_nonames"
+extra = 35
+[[suites.areWeFast.benchmarks]]
+name = "Bounce_nonames_simple"
+extra = 35
+[[suites.areWeFast.benchmarks]]
+name = "Storage"
+extra = 100
+
+[suites.kaggle]
+command = [
+  "{Rpath}/bin/Rscript",
+  "../../harness.r",
+  "{benchmark}",
+  "{example-iterations}"
+]
+working-directory = "{benchmarks}/kaggle/{benchmark}"
+benchmarks = [
+  "basic-analysis",
+  "bolt-driver",
+  "london-airbnb",
+  "placement",
+  "titanic"
+]
