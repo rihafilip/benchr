@@ -1,128 +1,21 @@
-from pathlib import Path
-from typing import Callable, TextIO
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+import argparse
 import shutil
-import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 import sys
+import subprocess
 
-Env = dict[str, str]
-
-
-class Executor:
-    explicit: bool
-
-    def __init__(self, explicit: bool) -> None:
-        self.explicit = explicit
-
-    def execute(
-        self,
-        command: list[str],
-        folder: Path,
-        env: Env,
-        info: dict[str, str],
-    ): ...
+import benchr
+from benchr import Env
+import split_results
 
 
-class ParallelExecutor(Executor):
-    pool: ThreadPoolExecutor
-
-    def __init__(self, explicit: bool, ncores: int) -> None:
-        super().__init__(explicit)
-        self.pool = ThreadPoolExecutor(max_workers=ncores)
-
-    def execute(self, *args, **kwargs):
-        self.pool.submit(super().execute, *args, **kwargs)
-
-    def __enter__(self):
-        self.pool.__enter__()
-        return self
-
-    def __exit__(self, *args):
-        return self.pool.__exit__(*args)
+def run_cmd(*args, **kwargs):
+    return subprocess.run(*args, check=True, **kwargs)
 
 
-class BenchmarkRunner(Executor):
-    result: TextIO
-
-    def __init__(self, explicit: bool, result: TextIO) -> None:
-        super().__init__(explicit)
-        self.result = result
-
-    def execute(
-        self,
-        command: list[str],
-        folder: Path,
-        env: Env,
-        info: dict[str, str],
-    ): ...
-
-    def __enter__(self):
-        self.result.__enter__()
-        return self
-
-    def __exit__(self, *args):
-        return self.result.__exit__(*args)
-
-
-def benchmark_runner(explicit: bool, result_path: Path) -> BenchmarkRunner:
-    # TODO: Check rebench-denoise
-    # TODO: write CSV headers
-    file = open(result_path, "w")
-    try:
-        file.write(",".join(csv_headers))
-        file.write("\n")
-    except:
-        file.close()
-        raise
-
-    return BenchmarkRunner(explicit=explicit, result=file)
-
-
-@dataclass
-class Benchmark[T]:
-    name: str
-    data: T
-
-
-@dataclass
-class BenchmarkSuite[T]:
-    all_benchmarks: list[Benchmark[T]]
-    suite: str
-
-    to_command: Callable[[Benchmark[T]], list[str]]
-    folder: Path | Callable[[Benchmark[T]], Path]
-    env: Env | Callable[[Benchmark[T]], Env]
-
-
-Experiment = list[BenchmarkSuite]
-
-
-def run_benchmark_suite(executor: Executor, suite: BenchmarkSuite, base_env: Env):
-    for benchmark in suite.all_benchmarks:
-        command = suite.to_command(benchmark)
-        folder = suite.folder(benchmark) if callable(suite.folder) else suite.folder
-        env = base_env | (suite.env(benchmark) if callable(suite.env) else suite.env)
-        info = {
-            "benchmark": benchmark.name,
-            "suite": suite.suite,
-        }
-
-        executor.execute(
-            command=command,
-            folder=folder,
-            env=env,
-            info=info,
-        )
-
-
-def run_experiment(executor: Executor, experiment: Experiment, base_env: Env):
-    for benchmark_suite in experiment:
-        run_benchmark_suite(executor, benchmark_suite, base_env)
-
-
-# ------------------------------------------------
-
+# --------------------------------------
 
 LOCALE: Env = {
     "LC_CTYPE": "en_US.UTF-8",
@@ -147,6 +40,7 @@ DEFAULT_ENV: Env = LOCALE | {
     "STATS_USE_RIR_NAMES": "1",
 }
 
+# TODO: Full suites
 ARE_WE_FAST = [
     ("Mandelbrot", 500),
     ("Bounce", 35),
@@ -247,167 +141,371 @@ INPUTS = Path(__file__).resolve() / "inputs"
 BENCHMARKS = INPUTS / "Benchmarks"
 
 
-class BenchmarkBuilder:
-    Rpath: Path
-    record: bool
-    results_folder: Path
-    compile_log_folder: Path
-
-    def __init__(
-        self, Rpath: Path, record: bool, results_folder: Path, compile_log_folder: Path
-    ) -> None:
-        self.Rpath = Rpath
-        self.record = record
-        self.results_folder = results_folder
-        self.compile_log_folder = compile_log_folder
-
-    def make_benchmark_command_callback(
-        self, iterations: int, extra_param: Callable[[Benchmark], str]
-    ):
-        def make_command(benchmark: Benchmark) -> list[str]:
-            return [
-                str(self.Rpath),
-                "harness.r",
-                benchmark.name,
-                str(iterations),
-                extra_param(benchmark),
-            ]
-
-        return make_command
-
-    def make_env_callback(self, suite: str):
-        if self.record:
-
-            def record_env(benchmark: Benchmark) -> Env:
-                return {
-                    "PIR_DEBUG_FOLDER": str(self.results_folder / benchmark.name),
-                    "STATS_NAME": f"{suite}:{benchmark.name}",
-                    "STATS_USED": str(
-                        self.compile_log_folder / f"{benchmark.name}_{suite}_slots"
-                    ),
-                }
-
-            return record_env
-        else:
-            return {}
-
-    def areWeFast(self, iterations: int) -> BenchmarkSuite:
-        all_benchmarks = list(map(lambda x: Benchmark(x[0], str(x[1])), ARE_WE_FAST))
-
-        return BenchmarkSuite(
-            all_benchmarks=all_benchmarks,
-            to_command=self.make_benchmark_command_callback(
-                iterations, lambda x: str(x.data)
-            ),
-            suite="areWeFast",
-            folder=BENCHMARKS / "areWeFast",
-            env=self.make_env_callback("areWeFast"),
-        )
-
-    def shootout(self, iterations: int) -> BenchmarkSuite:
-        all_benchmarks = list(map(lambda x: Benchmark(x[0], (x[1], x[2])), SHOOTOUT))
-
-        def folder(benchmark: Benchmark) -> Path:
-            return BENCHMARKS / "shootout" / benchmark.data[0]
-
-        return BenchmarkSuite(
-            all_benchmarks=all_benchmarks,
-            to_command=self.make_benchmark_command_callback(
-                iterations, lambda x: str(x.data[1])
-            ),
-            suite="shootout",
-            folder=folder,
-            env=self.make_env_callback("shootout"),
-        )
-
-    def realThing(self, iterations: int) -> BenchmarkSuite:
-        all_benchmarks = list(map(lambda x: Benchmark(x[0], x[1]), REAL_THING))
-
-        return BenchmarkSuite(
-            all_benchmarks=all_benchmarks,
-            to_command=self.make_benchmark_command_callback(
-                iterations, lambda x: str(x.data)
-            ),
-            suite="realThing",
-            folder=BENCHMARKS / "RealThing",
-            env=self.make_env_callback("realThing"),
-        )
-
-    def kaggles(self, iterations: int) -> BenchmarkSuite:
-        all_benchmarks = list(map(lambda x: Benchmark(x, None), KAGGLE))
-
-        def to_command(benchmark: Benchmark) -> list[str]:
-            if self.record:
-                return [str(self.Rpath), "script.R"]
-            else:
-                return [
-                    str(self.Rpath),
-                    str(INPUTS / "kaggle" / "harness.r"),
-                    benchmark.name,
-                    str(iterations),
-                ]
-
-        def folder(benchmark: Benchmark) -> Path:
-            return INPUTS / "kaggle" / benchmark.name / "code"
-
-        return BenchmarkSuite(
-            all_benchmarks=all_benchmarks,
-            to_command=to_command,
-            suite="kaggle",
-            folder=folder,
-            env=self.make_env_callback("kaggle"),
-        )
-
-    def recommenderlab(self, iterations: int) -> BenchmarkSuite:
-        def to_command(_: Benchmark) -> list[str]:
-            if self.record:
-                return [str(self.Rpath), "runner.r"]
-            else:
-                return [str(self.Rpath), "harness.r", str(iterations)]
-
-        return BenchmarkSuite(
-            all_benchmarks=[Benchmark("recommenderlab", None)],
-            to_command=to_command,
-            suite="recommenderlab",
-            folder=INPUTS / "recommenderlab",
-            env=self.make_env_callback("recommenderlab"),
-        )
-
-
-def build_experiment(
-    Rpath: Path,
-    benchmark_iterations: int,
-    example_iterations: int,
-    record: bool,
-    results_folder: Path,
-    compile_log_folder: Path,
-) -> list[BenchmarkSuite]:
-    builder = BenchmarkBuilder(Rpath, record, results_folder, compile_log_folder)
-
-    return [
-        builder.areWeFast(benchmark_iterations),
-        builder.shootout(benchmark_iterations),
-        builder.realThing(benchmark_iterations),
-        builder.kaggles(example_iterations),
-        builder.recommenderlab(example_iterations),
-    ]
+@dataclass
+class Iterations:
+    areWeFast: int
+    shootout: int
+    realThing: int
+    kaggle: int
+    recommenderlab: int
 
 
 BENCHMARKS_ITERATIONS = 20
 EXAMPLES_ITERATIONS = 15
+ITERATIONS = Iterations(
+    areWeFast=BENCHMARKS_ITERATIONS,
+    shootout=BENCHMARKS_ITERATIONS,
+    realThing=BENCHMARKS_ITERATIONS,
+    kaggle=EXAMPLES_ITERATIONS,
+    recommenderlab=EXAMPLES_ITERATIONS,
+)
+
+
+class Runner:
+    Rpath: str
+    iterations: Iterations
+    default_env: Env
+
+    results_folder: Path
+    used_folder: Optional[Path]
+    record: bool
+
+    def __init__(
+        self,
+        Rpath: str,
+        iterations: Iterations,
+        default_env: Env,
+        results_folder: Path,
+        used_folder: Optional[Path],
+        record: bool,
+    ) -> None:
+        self.Rpath = Rpath
+        self.iterations = iterations
+        self.default_env = default_env
+
+        self.results_folder = results_folder
+        self.used_folder = used_folder
+        self.record = record
+
+    def make_env(self, suite: str, benchmark: str) -> Env:
+        env = self.default_env
+
+        if self.record:
+            env["STATS_NAME"] = f"{suite}:{benchmark}"
+
+            if env.get("PIR_DEBUG", "").strip() != "":
+                compile_log_folder = (
+                    self.results_folder / "compile-log" / f"{benchmark}_{suite}_slots"
+                )
+                compile_log_folder.mkdir(parents=True, exist_ok=True)
+                env["PIR_DEBUG_FOLDER"] = str(self.results_folder / benchmark)
+
+        if self.used_folder is not None:
+            env |= {"STATS_USED": str(self.used_folder / f"{benchmark}_{suite}_slots")}
+
+        return env
+
+    def areWeFast(self, executor: benchr.Executor):
+        for name, arg in ARE_WE_FAST:
+            cmd = [
+                self.Rpath,
+                "harness.r",
+                name,
+                str(self.iterations.areWeFast),
+                str(arg),
+            ]
+            folder = BENCHMARKS / "areWeFast"
+            env = self.make_env("areWeFast", name)
+
+            executor.execute(
+                command=cmd,
+                folder=folder,
+                env=env,
+                info={"benchmark": name, "suite": "areWeFast"},
+            )
+
+    def shootout(self, executor: benchr.Executor):
+        for name, subfolder, arg in SHOOTOUT:
+            cmd = [
+                self.Rpath,
+                "harness.r",
+                name,
+                str(self.iterations.shootout),
+                str(arg),
+            ]
+            folder = BENCHMARKS / "shootout" / subfolder
+            env = self.make_env("shootout", name)
+
+            executor.execute(
+                command=cmd,
+                folder=folder,
+                env=env,
+                info={"benchmark": name, "suite": "shootout"},
+            )
+
+    def realThing(self, executor: benchr.Executor):
+        for name, arg in REAL_THING:
+            cmd = [
+                self.Rpath,
+                "harness.r",
+                name,
+                str(self.iterations.realThing),
+                str(arg),
+            ]
+            folder = BENCHMARKS / "RealThing"
+            env = self.make_env("realThing", name)
+
+            executor.execute(
+                command=cmd,
+                folder=folder,
+                env=env,
+                info={"benchmark": name, "suite": "RealThing"},
+            )
+
+    def kaggle(self, executor: benchr.Executor):
+        for kaggle in KAGGLE:
+            if self.record:
+                cmd = [self.Rpath, "script.R"]
+            else:
+                cmd = [
+                    self.Rpath,
+                    str(INPUTS / "kaggle" / "harness.r"),
+                    kaggle,
+                    str(self.iterations.kaggle),
+                ]
+            folder = INPUTS / "kaggle" / kaggle / "code"
+            env = self.make_env("kaggle", kaggle)
+
+            executor.execute(
+                command=cmd,
+                folder=folder,
+                env=env,
+                info={"benchmark": kaggle, "suite": "kaggle"},
+            )
+
+    def recommenderlab(self, executor: benchr.Executor):
+        if self.record:
+            cmd = [self.Rpath, "runner.r"]
+        else:
+            cmd = [self.Rpath, "harness.r", str(self.iterations.recommenderlab)]
+        folder = INPUTS / "recommenderlab"
+        env = self.make_env("recommenderlab", "recommenderlab")
+
+        executor.execute(
+            command=cmd,
+            folder=folder,
+            env=env,
+            info={"benchmark": "recommenderlab", "suite": "recommenderlab"},
+        )
+
+    def run(self, executor: benchr.Executor):
+        self.areWeFast(executor)
+        self.shootout(executor)
+        self.realThing(executor)
+        self.kaggle(executor)
+        self.recommenderlab(executor)
 
 
 def record(
     Rpath: Path,
     results_folder: Path,
-    explicit_executor: bool,
     ncores: int,
-    explicit_stats: bool,
-    verbose_stats: bool,
-    pir_debug: str,
+    env: Env = {},
+    explicit_executor: bool = False,
+    stats_quiet: bool = True,
+    stats_verbose: bool = True,
+    pir_debug: str = "",
 ):
-    # TODO: in main
+    env = (
+        DEFAULT_ENV
+        | env
+        | {
+            "STATS_CSV": str(results_folder / "stats.csv"),
+            "STATS_BY_SLOTS": str(results_folder / "stats_by_slots.csv"),
+            "STATS_QUIET": "1" if stats_quiet else "0",
+            "STATS_VERBOSE": "1" if stats_verbose else "0",
+            "PIR_DEBUG": pir_debug,
+        }
+    )
+
+    compile_log_folder = results_folder / "compile-log"
+
+    if pir_debug != "":
+        compile_log_folder.mkdir()
+
+    runner = Runner(
+        Rpath=str(Rpath),
+        iterations=ITERATIONS,
+        default_env=env,
+        results_folder=results_folder,
+        used_folder=None,
+        record=True,
+    )
+
+    with benchr.ParallelExecutor(explicit_executor, ncores) as executor:
+        runner.run(executor)
+
+
+def benchmark(
+    Rpath: Path,
+    experiment_name: str,
+    results_folder: Path,
+    env: Env = {},
+    used_folder: Optional[Path] = None,
+    explicit_executor: bool = False,
+):
+    env = (
+        DEFAULT_ENV
+        | env
+        | {
+            "STATS_QUIET": "1",
+            "STATS_NO_USED": "1",
+        }
+    )
+
+    runner = Runner(
+        Rpath=str(Rpath),
+        iterations=ITERATIONS,
+        default_env=env,
+        results_folder=results_folder,
+        used_folder=used_folder,
+        record=False,
+    )
+
+    result_csv = (
+        f"benchmark_{experiment_name}.tsv" if experiment_name != "" else "benchmark.tsv"
+    )
+
+    with benchr.BenchmarkRunner(
+        explicit_executor,
+        results_folder / result_csv,
+        ["benchmark", "suite"],
+    ) as executor:
+        runner.run(executor)
+
+
+def rebench(Rpath: Path, results_folder: Path, ncores: int):
+    record_folder = results_folder / "record"
+    splits_reduced = results_folder / "split-reduced"
+    splits_minimal = results_folder / "split-minimal"
+
+    # Record
+    record(Rpath, results_folder=results_folder / "record", ncores=ncores)
+
+    # Split
+    split_results.split(
+        str(record_folder),
+        str(splits_reduced),
+    )
+    # run_cmd(
+    #     [
+    #         str(Path(__file__).resolve() / ".venv" / "bin" / "python"),
+    #         "split_results.py",
+    #         str(record_folder),
+    #         str(splits_reduced),
+    #     ],
+    # )
+
+    split_results.split(
+        str(record_folder),
+        str(splits_minimal),
+        "minimal",
+    )
+    # run_cmd(
+    #     [
+    #         str(Path(__file__).resolve() / ".venv" / "bin" / "python"),
+    #         "split_results.py",
+    #         str(record_folder),
+    #         str(splits_minimal),
+    #         "minimal",
+    #     ],
+    # )
+
+    # Experiments experiment
+    benchmark(Rpath, "baseline", results_folder)
+    benchmark(Rpath, "reduced", results_folder, used_folder=splits_reduced)
+    benchmark(Rpath, "minimal", results_folder, used_folder=splits_minimal)
+    benchmark(Rpath, "no_slots", results_folder, env={"STATS_TF_RECORD": "0"})
+
+    # Interpreter
+    interp_env = {"PIR_ENABLE": "off"}
+
+    benchmark(Rpath, "baseline_interp", results_folder)
+    benchmark(
+        Rpath,
+        "reduced_interp",
+        results_folder,
+        used_folder=splits_reduced,
+        env=interp_env,
+    )
+    benchmark(
+        Rpath,
+        "minimal_interp",
+        results_folder,
+        used_folder=splits_minimal,
+        env=interp_env,
+    )
+    benchmark(
+        Rpath,
+        "no_slots_interp",
+        results_folder,
+        env=interp_env | {"STATS_TF_RECORD": "0"},
+    )
+
+
+def main():
+    p = argparse.ArgumentParser(prog="example")
+
+    p.add_argument(
+        "experiment",
+        help="The experiment to run",
+        choices=["benchmark", "record", "rebench"],
+    )
+
+    p.add_argument("Rpath", help="The path to Ř build folder (no bin/R)")
+    p.add_argument("results_folder", help="The folder to put results to")
+    p.add_argument(
+        "--force-results",
+        help="If results folder exists, delete it",
+        action="store_true",
+    )
+    p.add_argument(
+        "--explicit",
+        help="Display explicit information about executed commands",
+        action="store_true",
+    )
+    p.add_argument(
+        "--ncores",
+        "-j",
+        help="Number of processes to run in parallel with (default: 30)",
+        type=int,
+        default=30,
+    )
+
+    penv = p.add_argument_group("Ř reporting")
+    penv.add_argument("--stats-quiet", action="store_true")
+    penv.add_argument("--stats-verbose", action="store_true")
+    penv.add_argument(
+        "--pir_debug",
+        help="PIR_DEBUG",
+        default="PrintEarlyRir,PrintEarlyPir,PrintPirAfterOpt,PrintOptimizationPasses,OmitDeoptBranches,OnlyChanges",
+    )
+
+    # Parse
+    args = p.parse_args()
+    print(args)
+
+    # Common stuff
+    Rpath = Path(args.Rpath).resolve()
+    results_folder = Path(args.results_folder).resolve()
+    explicit_executor = args.explicit
+
+    # Results folder shenanigans
     if results_folder.exists():
+        if not args.force_results:
+            print(f"ERROR: {results_folder} exists")
+            sys.exit(1)
+
         if results_folder.is_dir():
             shutil.rmtree(results_folder)
         else:
@@ -415,67 +513,30 @@ def record(
 
     results_folder.mkdir(parents=True, exist_ok=True)
 
-    # PIR_DEBUG
-    # "PrintEarlyRir,PrintEarlyPir,PrintPirAfterOpt,PrintOptimizationPasses,OmitDeoptBranches,OnlyChanges",
-    # STAT_QUIET 0
-    # STATS_VERBOSE 0
+    # Prepare inputs
+    run_cmd(str(INPUTS / "prepare_inputs.sh"))
 
-    env = DEFAULT_ENV | {
-        "STATS_CSV": str(results_folder / "stats.csv"),
-        "STATS_BY_SLOTS": str(results_folder / "stats_by_slots.csv"),
-        "STATS_QUIET": "1" if explicit_stats else "0",
-        "STATS_VERBOSE": "1" if verbose_stats else "0",
-        "PIR_DEBUG": pir_debug,
-    }
-
-    compile_log_folder = results_folder / "compile-log"
-
-    if pir_debug != "":
-        compile_log_folder.mkdir()
-
-    experiment = build_experiment(
-        Rpath,
-        benchmark_iterations=BENCHMARKS_ITERATIONS,
-        example_iterations=EXAMPLES_ITERATIONS,
-        record=True,
-        results_folder=results_folder,
-        compile_log_folder=compile_log_folder,
-    )
-
-    with ParallelExecutor(explicit_executor, ncores) as executor:
-        run_experiment(executor, experiment, env)
-
-
-BENCHMARK_ENV = {
-    "STATS_QUIET": "1",
-    "STATS_NO_USED": "1",
-}
-
-
-def benchmark(
-    Rpath: Path,
-    experiment_name: str,
-    results_folder: Path,
-    explicit_executor: bool,
-):
-    env = DEFAULT_ENV | BENCHMARK_ENV
-
-    experiment = build_experiment(
-        Rpath,
-        benchmark_iterations=BENCHMARKS_ITERATIONS,
-        example_iterations=EXAMPLES_ITERATIONS,
-        record=False,
-        results_folder=results_folder,
-        compile_log_folder=None,
-    )
-
-    with benchmark_runner(
-        explicit_executor, results_folder / f"benchmark_{experiment_name}.tsv"
-    ) as executor:
-        run_experiment(executor, experiment, env)
-
-
-def main(): ...
+    # Run
+    e = args.experiment
+    if e == "benchmark":
+        benchmark(
+            Rpath,
+            experiment_name="",
+            results_folder=results_folder,
+            explicit_executor=explicit_executor,
+        )
+    elif e == "record":
+        record(
+            Rpath,
+            results_folder=results_folder,
+            ncores=args.ncores,
+            explicit_executor=explicit_executor,
+            stats_quiet=args.stats_quiet,
+            stats_verbose=args.stats_verbose,
+            pir_debug=args.pir_debug,
+        )
+    elif e == "rebench":
+        rebench(Rpath, results_folder, args.ncores)
 
 
 if __name__ == "__main__":
