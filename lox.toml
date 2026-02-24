@@ -1,0 +1,23 @@
+parameters = ["lox"]
+
+[default]
+command = [
+  "{lox}",
+  "{benchmark}.lox"
+]
+working_directory = "{cwd}"
+env = {}
+
+[suites.default]
+benchmarks = [
+  "binary_trees",
+  "equality",
+  "fib",
+  "instantiation",
+  "invocation",
+  "method_call",
+  "properties",
+  "string_equality",
+  "zoo_batch",
+  "zoo",
+]

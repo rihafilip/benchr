@@ -1,13 +1,10 @@
 parameters = ["Rpath"]
 
 [default]
-iterations = 20
-example-iterations = 15
 parser = "ReBench"
 
-[matrix]
+[default.matrix]
 machines = ["x86_64-linux", "x86_64-windows"]
-
 
 [default.env]
 LC_CTYPE = "en_US.UTF-8"
@@ -24,16 +21,19 @@ LC_TELEPHONE = "C"
 LC_IDENTIFICATION = "C"
 
 [variables]
-benchmarks = '{cwd}/benchmarks'
+benchmarks-dir = '{cwd}/benchmarks'
+iterations = 20
+example-iterations = 15
 
 [suites.areWeFast]
-working_directory = '{benchmarks}/areWeFast'
+working_directory = '{benchmarks-dir}/areWeFast'
 command = [
-  "{Rpath}/bin/Rscript",
-  "harness.r",
-  "{benchmark}",
-  "{iterations}",
-  "{extra}",
+  '{Rpath}/bin/Rscript',
+  'harness.r',
+  '{benchmark}',
+  '{iterations}',
+  '{matrix.machine}',
+  '{extra}',
 ]
 [[suites.areWeFast.benchmarks]]
 name = "Mandelbrot"
@@ -49,16 +49,16 @@ name = "Bounce_nonames_simple"
 extra = 35
 [[suites.areWeFast.benchmarks]]
 name = "Storage"
-extra = 100
+extra = { foo = "1", bar = "2" }
 
 [suites.kaggle]
 command = [
   "{Rpath}/bin/Rscript",
   "../../harness.r",
   "{benchmark}",
-  "{example-iterations}"
+  "{example-iterations}",
 ]
-working-directory = "{benchmarks}/kaggle/{benchmark}"
+working-directory = "{benchmarks-dir}/kaggle/{benchmark}"
 benchmarks = [
   "basic-analysis",
   "bolt-driver",
