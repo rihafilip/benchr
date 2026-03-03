@@ -1,5 +1,7 @@
 from pathlib import Path
 import os
+import shutil
+import subprocess
 from types import SimpleNamespace
 import tempfile
 from contextlib import ExitStack
@@ -8,56 +10,25 @@ import pprint
 import benchr
 from benchr import (
     Benchmark,
-    BenchmarkExecutor,
     Config,
     DryExecutor,
-    Executor,
-    ParallelExecutor,
+    DefaultExecutor,
+    Parameters,
     Suite,
-    default_mk_info,
+    config_to_runs,
 )
 
-# Assuming this is in `rcp` subfolder of PRL_PRG/rcp
 CWD = Path("/home/rihafilip/code/r/rcp/rcp")
 # TODO:
+# Assuming this is in `rcp` subfolder of PRL_PRG/rcp
 # CWD = Path(__file__).parent
-
-
-class RCPSuite(Suite):
-    name = "RCPSuite"
-    working_directory = CWD
-    env = {}
-
-    def __init__(self, benchmarks: list[Benchmark]) -> None:
-        super().__init__()
-        self.benchmarks = benchmarks
-
-    def mk_command(
-        self, parameters: SimpleNamespace, benchmark: Benchmark
-    ) -> list[str]:
-        path: Path = benchmark.data[0]
-        bench_opts: str = parameters.bench_opts
-
-        return (
-            ["/usr/bin/time", "-v"]
-            + [str(parameters.R), "--slave", "--no-restore"]
-            + ["-f", str(parameters.harness_bin), "--args"]
-            + [
-                "--output-dir",
-                parameters.output,
-                "--runs",
-                str(parameters.runs),
-            ]
-            + bench_opts.split()
-            + [str(path.with_suffix(""))]
-        )
 
 
 def check_microbenchmark(Rscript: Path):
     benchr.run_cmd(
         [
             Rscript,
-            "-e"
+            "-e",
             """if (!requireNamespace("microbenchmark", quietly=TRUE)) quit(status=1)""",
         ]
     )
@@ -70,39 +41,63 @@ def main():
             R_HOME=CWD / ".." / "external" / "rsh" / "external" / "R",
             bench_opts="--rcp",
             filter="",
-            parallel=str(os.cpu_count()),
+            parallel=os.cpu_count(),
             runs=1,
             output=None,
         )
 
-        params.RSH_HOME = Path(params.RSH_HOME).resolve()
-        params.R_HOME = Path(params.R_HOME).resolve()
+        RSH_HOME = params.RSH_HOME.resolve()
+        R_HOME = params.R_HOME.resolve()
+        bench_opts = params.bench_opts.split()
+        filter = params.filter
+        parallel = params.parallel
+        runs = params.runs
+        output = (
+            params.output
+            if params.output is not None
+            else estack.enter_context(tempfile.TemporaryDirectory())
+        )
 
-        params.bench_dir = params.RSH_HOME / "inst" / "benchmarks"
-        params.harness_bin = params.RSH_HOME / "inst" / "benchmarks" / "harness.R"
+        bench_dir = RSH_HOME / "inst" / "benchmarks"
+        harness_bin = RSH_HOME / "inst" / "benchmarks" / "harness.R"
 
-        params.R = params.R_HOME / "bin" / "R"
-        params.Rscript = params.R_HOME / "bin" / "Rscript"
+        R = R_HOME / "bin" / "R"
+        Rscript = R_HOME / "bin" / "Rscript"
 
-        if params.output is None:
-            params.output = estack.enter_context(tempfile.TemporaryDirectory())
-
-        pprint.pprint(params)
-
-        all_benchmarks = [
+        benchmarks = [
             Benchmark(path.stem, path)
-            for path in params.bench_dir.rglob(f"*{params.filter}*.R")
+            for path in bench_dir.rglob(f"*{filter}*.R")
             # Top level has main program and harness -> we want benchmarks
-            if path.parent != params.bench_dir
+            if path.parent != bench_dir
         ]
 
-        check_microbenchmark(params.Rscript)
+        time = shutil.which("time")
+        if time is None:
+            raise ValueError("time utility is not available")
 
-        conf = Config(RCPSuite(all_benchmarks))
+        RCPSuite = Suite(
+            name="RCPSuite",
+            benchmarks=benchmarks,
+            working_directory=CWD,
+            command=lambda _, benchmark: (
+                [time, "-v"]
+                + [str(R), "--slave", "--no-restore"]
+                + ["-f", str(harness_bin), "--args"]
+                + ["--output-dir", output]
+                + ["--runs", str(runs)]
+                + bench_opts
+                + [str(benchmark.data.with_suffix(""))]
+            ),
+        )
+
+        runs = config_to_runs(Config(RCPSuite), params)
+
+        check_microbenchmark(Rscript)
 
         # TODO: Executor
-        executor = DryExecutor()
-        benchr.run_config(executor, conf, params, default_mk_info)
+        # executor = DryExecutor()
+        with DefaultExecutor(benchr.RebenchParser(), benchr.CsvFormatter()) as executor:
+            executor.execute_all(runs)
 
 
 if __name__ == "__main__":

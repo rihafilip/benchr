@@ -205,7 +205,7 @@ class Runner:
 
         return env
 
-    def areWeFast(self, executor: benchr.Executor):
+    def areWeFast(self, executor: benchr.DefaultExecutor):
         for name, arg in ARE_WE_FAST:
             cmd = [
                 self.Rpath,
@@ -224,7 +224,7 @@ class Runner:
                 info={"benchmark": name, "suite": "areWeFast"},
             )
 
-    def shootout(self, executor: benchr.Executor):
+    def shootout(self, executor: benchr.DefaultExecutor):
         for name, subfolder, arg in SHOOTOUT:
             cmd = [
                 self.Rpath,
@@ -243,7 +243,7 @@ class Runner:
                 info={"benchmark": name, "suite": "shootout"},
             )
 
-    def realThing(self, executor: benchr.Executor):
+    def realThing(self, executor: benchr.DefaultExecutor):
         for name, arg in REAL_THING:
             cmd = [
                 self.Rpath,
@@ -262,7 +262,7 @@ class Runner:
                 info={"benchmark": name, "suite": "RealThing"},
             )
 
-    def kaggle(self, executor: benchr.Executor):
+    def kaggle(self, executor: benchr.DefaultExecutor):
         for kaggle in KAGGLE:
             if self.record:
                 cmd = [self.Rpath, "script.R"]
@@ -283,7 +283,7 @@ class Runner:
                 info={"benchmark": kaggle, "suite": "kaggle"},
             )
 
-    def recommenderlab(self, executor: benchr.Executor):
+    def recommenderlab(self, executor: benchr.DefaultExecutor):
         if self.record:
             cmd = [self.Rpath, "runner.r"]
         else:
@@ -298,7 +298,7 @@ class Runner:
             info={"benchmark": "recommenderlab", "suite": "recommenderlab"},
         )
 
-    def run(self, executor: benchr.Executor):
+    def run(self, executor: benchr.DefaultExecutor):
         self.areWeFast(executor)
         self.shootout(executor)
         self.realThing(executor)
