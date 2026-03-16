@@ -1,7 +1,6 @@
 from pathlib import Path
 
-import benchr
-from benchr import B, RebenchParser, config, Suite
+from benchr import *
 
 INPUTS = Path(__file__).resolve() / "inputs"
 BENCHMARKS = INPUTS / "Benchmarks"
@@ -22,16 +21,7 @@ LOCALE = {
     "LC_IDENTIFICATION": "C",
 }
 
-DEFAULT_ENV = LOCALE | {
-    "PIR_OSR": "0",
-    "PIR_WARMUP": "10",
-    "PIR_GLOBAL_SPECIALIZATION_LEVEL": "0",
-    "PIR_DEFAULT_SPECULATION": "0",
-    "STATS_USE_RIR_NAMES": "1",
-}
-
-
-AreWeFast = Suite(
+AreWeFast = suite(
     name="areWeFast",
     working_directory=BENCHMARKS / "areWeFast",
     benchmarks=[
@@ -51,7 +41,7 @@ AreWeFast = Suite(
     ],
 )
 
-Shootout = Suite(
+Shootout = suite(
     name="shootout",
     benchmarks=[
         B("binarytrees", "binarytrees", 9),
@@ -83,7 +73,7 @@ Shootout = Suite(
 )
 
 
-RealThing = Suite(
+RealThing = suite(
     name="RealThing",
     working_directory=BENCHMARKS / "RealThing",
     benchmarks=[
@@ -103,7 +93,7 @@ RealThing = Suite(
 )
 
 
-Kaggles = Suite(
+Kaggles = suite(
     name="kaggle",
     benchmarks=[
         "basic-analysis",
@@ -123,7 +113,7 @@ Kaggles = Suite(
 )
 
 
-Recommenderlab = Suite(
+Recommenderlab = suite(
     name="recommenderlab",
     benchmarks=["recommenderlab"],
     working_directory=INPUTS / "recommenderlab",
@@ -135,14 +125,13 @@ Recommenderlab = Suite(
 )
 
 
-conf = config(
+conf = Config(
     AreWeFast,
     Shootout,
     RealThing,
     Kaggles,
     Recommenderlab,
-    env=DEFAULT_ENV,
-)
+).env(LOCALE)
 
 if __name__ == "__main__":
-    benchr.main(conf, "Rpath", iterations=15)
+    main(conf, ["Rpath"], {"iterations": 15})
