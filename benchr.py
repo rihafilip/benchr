@@ -266,7 +266,7 @@ class Suite(BenchmarkCollection["Suite"]):
         """
         Create a simplified config with only one Suite
         """
-        return Config([self])
+        return Config(self)
 
 
 class BaseSuite(Suite):
@@ -504,8 +504,6 @@ class TimeSuite(SuiteDecorator):
 #          CONFIGURATION
 # --------------------------------------
 
-# TODO: command, wd and env to non-callable
-
 
 @dataclass
 class Config(BenchmarkCollection["Config"]):
@@ -524,36 +522,60 @@ class Config(BenchmarkCollection["Config"]):
     ] = None
     default_env: Callable[[Parameters, Execution.Incomplete], Env] = const({})
 
+    def __init__(self, *suites: Suite) -> None:
+        self.suites = list(suites)
+
     def command(
         self,
-        default_command: Optional[
-            Callable[[Parameters, Execution.Incomplete], Command]
-        ],
+        default_command: Callable[[Parameters, Execution.Incomplete], Command]
+        | Command,
     ) -> "Config":
         """
         Define a default command for all benchmarks
         """
+        if self.command is not None:
+            raise ValueError("Multiple definitions of default command")
+
+        if not callable(default_command):
+            default_command = const(default_command)
+
         return dataclasses.replace(self, default_command=default_command)
 
     def working_directory(
         self,
-        default_working_directory: Callable[[Parameters, Execution.Incomplete], Path],
+        default_working_directory: Callable[[Parameters, Execution.Incomplete], Path]
+        | Path,
     ) -> "Config":
         """
         Define a default working directory for all benchmarks
         """
+        if self.working_directory is not None:
+            raise ValueError("Multiple definitions of default working directory")
+
+        if not callable(default_working_directory):
+            default_working_directory = const(default_working_directory)
+
         return dataclasses.replace(
             self, default_working_directory=default_working_directory
         )
 
     def env(
         self,
-        default_env: Callable[[Parameters, Execution.Incomplete], Env],
+        default_env: Callable[[Parameters, Execution.Incomplete], Env] | Env,
     ) -> "Config":
         """
         Define a default environment for all benchmarks
         """
-        return dataclasses.replace(self, default_env=default_env)
+        if not callable(default_env):
+            default_env = const(default_env)
+
+        if self.default_env is not None:
+            prev_default_env = self.default_env
+            callback = lambda ps, e: prev_default_env(ps, e) | default_env(ps, e)
+        else:
+            callback = default_env
+
+        return dataclasses.replace(self, default_env=callback)
 
     def get_executions(self, parameters: Parameters) -> list[Execution]:
         """
@@ -1361,6 +1383,7 @@ class ParallelExecutor(DefaultExecutor):
     An executor that runs multiple tasks in parallel - mostly usable for
     collecting metrics other that runtime
     """
+
     pool: ThreadPoolExecutor
     lock: Lock
     in_process_runs: int
