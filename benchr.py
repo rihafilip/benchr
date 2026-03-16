@@ -22,14 +22,6 @@ def const[T](x: T) -> Callable[..., T]:
     return lambda *args, **kwargs: x
 
 
-# TODO: maybe adjust api, maybe remove
-def run_cmd(*args, **kwargs):
-    """
-    Run a very simple command, wrapper around subprocess.run
-    """
-    return subprocess.run(*args, check=True, **kwargs)
-
-
 # --------------------------------------
 #           DEFINITIONS
 # --------------------------------------
@@ -1435,7 +1427,6 @@ def main(
         sys.exit(0)
 
 
-# TODO: Catch keyboard_interrupts
 # TODO: Run info - date, reflog
 
 # --------------------------------------
@@ -1443,12 +1434,11 @@ def main(
 # --------------------------------------
 
 __all__ = [
-    # Helpers
-    "run_cmd",
     # Definitions
     "Env",
     "Command",
     "Parameters",
+    "TimeBinutilColumns",
     # Input definitions
     "Execution",
     "Benchmark",
@@ -1472,9 +1462,12 @@ __all__ = [
     "RegexParser",
     "RebenchParser",
     "MixedResultParser",
+    "time_parser",
     # Reporters
     "Reporter",
+    "MixedReporter",
     "CsvReporter",
+    "TableReporter",
     # Executors
     "Executor",
     "DefaultExecutor",
