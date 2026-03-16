@@ -50,7 +50,13 @@ class Parameters(SimpleNamespace):
         return Parameters(**vars(ns))
 
 
-TimeBinutilColumns = Literal["maximum_resident_size", "average_resident_size"]
+TimeBinutilColumns = Literal[
+    "maximum_resident_size",
+    "average_resident_size",
+    "user_time",
+    "system_time",
+    "clock_time",
+]
 
 
 # --------------------------------------
@@ -191,6 +197,7 @@ class BenchmarkCollection[This](abc.ABC):
     ) -> This:
         return self.apply_suite_decorator(
             lambda suite: MatrixSuite(
+                name,
                 suite,
                 parameters,
                 working_directory,
@@ -198,8 +205,16 @@ class BenchmarkCollection[This](abc.ABC):
             )
         )
 
-    def time(self, *columns: TimeBinutilColumns) -> This:
-        return self.apply_suite_decorator(lambda suite: TimeSuite(suite, list(columns)))
+    def time(
+        self, *columns: TimeBinutilColumns, time_bin: Optional[str] = None
+    ) -> This:
+        return self.apply_suite_decorator(
+            lambda suite: TimeSuite(
+                suite,
+                list(columns),
+                time_bin=time_bin,
+            )
+        )
 
 
 class Suite(BenchmarkCollection["Suite"]):
@@ -217,7 +232,7 @@ class Suite(BenchmarkCollection["Suite"]):
     ) -> Iterator[Execution.Incomplete]: ...
 
     def to_config(self) -> "Config":
-        return Config(self)
+        return Config([self])
 
 
 class BaseSuite(Suite):
@@ -334,6 +349,7 @@ class SuiteDecorator(Suite):
 
 
 class MatrixSuite[T](SuiteDecorator):
+    name: str
     parameters: Sequence[T]
 
     matrix_working_directory: Optional[Callable[[T], Path]]
@@ -341,6 +357,7 @@ class MatrixSuite[T](SuiteDecorator):
 
     def __init__(
         self,
+        name: str,
         parent: Suite,
         parameters: Sequence[T],
         working_directory: Optional[Callable[[T], Path]] = None,
@@ -348,7 +365,9 @@ class MatrixSuite[T](SuiteDecorator):
     ) -> None:
         super().__init__(parent)
 
+        self.name = name
         self.parameters = parameters
+
         self.matrix_working_directory = working_directory
 
         if env is None:
@@ -366,12 +385,20 @@ class MatrixSuite[T](SuiteDecorator):
             else:
                 wd = execution.working_directory
 
-            yield dataclasses.replace(execution, env=e, working_directory=wd)
+            i = execution.info | {self.name: str(p)}
+
+            yield dataclasses.replace(
+                execution,
+                env=e,
+                working_directory=wd,
+                info=i,
+            )
 
 
 class TimeSuite(SuiteDecorator):
     parent: Suite
-    parser: "TimeParser"
+    parser: "ResultParser"
+    format: str
     time_bin: str
 
     def __init__(
@@ -382,7 +409,8 @@ class TimeSuite(SuiteDecorator):
     ) -> None:
         super().__init__(parent)
 
-        self.parser = TimeParser(columns)
+        self.parser = time_parser(columns)
+        self.format = TimeSuite.make_format(columns)
 
         if time_bin is None:
             time_bin = shutil.which("time")
@@ -391,14 +419,41 @@ class TimeSuite(SuiteDecorator):
 
         self.time_bin = time_bin
 
+    @staticmethod
+    def make_format(columns: list[TimeBinutilColumns]) -> str:
+        format = ""
+        for col in columns:
+            if col == "maximum_resident_size":
+                format += "maximum_resident_size: %M\n"
+
+            elif col == "average_resident_size":
+                format += "average_resident_size: %t\n"
+
+            elif col == "user_time":
+                format += "user_time: %U\n"
+
+            elif col == "system_time":
+                format += "system_time: %S\n"
+
+            elif col == "clock_time":
+                format += "clock_time: %e\n"
+
+            else:
+                raise ValueError(f"Unknown Time column {col}")
+
+        return format
+
     def extend_execution(
         self, parameters: Parameters, execution: Execution.Incomplete
     ) -> Iterator[Execution.Incomplete]:
         if execution.command is None:
             raise ValueError("TimeSuite cannot extend an empty command")
 
-        execution.command = [self.time_bin, "-v"] + execution.command
-        execution.parser = self.parser
+        execution.command = [self.time_bin, "-f", self.format] + execution.command
+        if execution.parser is None:
+            execution.parser = self.parser
+        else:
+            execution.parser = MixedResultParser(execution.parser, self.parser)
         yield execution
 
 
@@ -415,22 +470,14 @@ class Config(BenchmarkCollection["Config"]):
 
     suites: list[Suite]
 
-    default_parser: Optional["ResultParser"]
-    default_command: Optional[Callable[[Parameters, Execution.Incomplete], Command]]
+    default_parser: Optional["ResultParser"] = None
+    default_command: Optional[Callable[[Parameters, Execution.Incomplete], Command]] = (
+        None
+    )
     default_working_directory: Optional[
         Callable[[Parameters, Execution.Incomplete], Path]
-    ]
-    default_env: Callable[[Parameters, Execution.Incomplete], Env]
-
-    def __init__(
-        self,
-        *suites: Suite,
-    ) -> None:
-        self.suites = list(suites)
-        self.default_parser = None
-        self.default_command = None
-        self.default_working_directory = None
-        self.default_env = const({})
+    ] = None
+    default_env: Callable[[Parameters, Execution.Incomplete], Env] = const({})
 
     def command(
         self,
@@ -588,34 +635,62 @@ class LastLineParser(ResultParser):
 
 
 class RegexParser(ResultParser):
+    type MatchGroup = str | int
+    type OutputType = Literal["stdout", "stderr", "both"]
+
     metric: str
     regex: re.Pattern[str]
-    match_group: str | int
-    unit: str
+    output: OutputType
+
+    match_group: MatchGroup
+    process: Callable[[str], float]
+
+    unit: Optional[str]
+    unit_match_group: Optional[MatchGroup]
+
     iterations: bool
 
     def __init__(
         self,
-        regex: str,
-        match_group: str | int,
         metric: str,
-        unit: str,
-        iterations: bool = True,
+        regex: re.Pattern[str],
+        output: OutputType,
+        match_group: MatchGroup,
+        process: Callable[[str], float] = float,
+        unit: Optional[str] = None,
+        unit_match_group: Optional[MatchGroup] = None,
+        iterations: bool = False,
     ) -> None:
-        self.regex = re.compile(regex)
-        self.match_group = match_group
         self.metric = metric
+        self.regex = regex
+        self.output = output
+
+        self.match_group = match_group
+        self.process = process
+
         self.unit = unit
+        self.unit_match_group = unit_match_group
+
         self.iterations = iterations
 
     def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
         result = ExecutionResult()
         iteration = 1
 
-        for line in stdout.split("\n"):
-            match = self.regex.match(line)
-            if match is not None:
-                value = float(match.group(self.match_group))
+        if self.output == "stdout":
+            outputs = [stdout]
+        elif self.output == "stderr":
+            outputs = [stderr]
+        elif self.output == "both":
+            outputs = [stdout, stderr]
+        else:
+            raise ValueError(f"Unknown output type {self.output}")
+
+        for output in outputs:
+            pos = 0
+            while (match := self.regex.search(output, pos)) is not None:
+                pos = match.end()
+                value = self.process(match.group(self.match_group))
 
                 if self.iterations:
                     info = {"iteration": str(iteration)}
@@ -623,12 +698,19 @@ class RegexParser(ResultParser):
                 else:
                     info = {}
 
+                if self.unit_match_group is not None:
+                    unit = match.group(self.unit_match_group)
+                elif self.unit is not None:
+                    unit = self.unit
+                else:
+                    unit = ""
+
                 result.measurements.append(
                     Measurement(
                         execution,
                         self.metric,
                         value,
-                        self.unit,
+                        unit,
                         info,
                     )
                 )
@@ -727,7 +809,7 @@ class MixedResultParser(ResultParser):
     parsers: list[ResultParser]
 
     def __init__(self, *parsers: ResultParser) -> None:
-        self.parsers = list(*parsers)
+        self.parsers = list(parsers)
 
     def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
         result = ExecutionResult()
@@ -738,15 +820,41 @@ class MixedResultParser(ResultParser):
         return result
 
 
-class TimeParser(ResultParser):
-    columns: list[TimeBinutilColumns]
+def time_parser(columns: list[TimeBinutilColumns]) -> ResultParser:
+    parsers = []
 
-    def __init__(self, columns: list[TimeBinutilColumns]) -> None:
-        self.columns = list(columns)
+    def mk_parser(column_name: str, unit: str) -> RegexParser:
+        return RegexParser(
+            column_name,
+            re.compile(
+                rf"^{column_name}: (\d+\.?\d*)$",
+                re.MULTILINE,
+            ),
+            "stderr",
+            match_group=1,
+            unit=unit,
+        )
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
-        # TODO:
-        raise NotImplemented
+    for col in columns:
+        if col == "maximum_resident_size":
+            parsers.append(mk_parser("maximum_resident_size", "kB"))
+
+        elif col == "average_resident_size":
+            parsers.append(mk_parser("average_resident_size", "kB"))
+
+        elif col == "user_time":
+            parsers.append(mk_parser("user_time", "s"))
+
+        elif col == "system_time":
+            parsers.append(mk_parser("system_time", "s"))
+
+        elif col == "clock_time":
+            parsers.append(mk_parser("clock_time", "s"))
+
+        else:
+            raise ValueError(f"Unknown Time column {col}")
+
+    return MixedResultParser(*parsers)
 
 
 # --------------------------------------
@@ -993,8 +1101,6 @@ class DefaultExecutor(Executor):
             f"{TUI.RED}{TUI.BOLD}Error in {execution.as_identifier()}{TUI.RESET}\n{msg}\n"
         )
 
-        # TODO: save to folder
-
         if stdout is not None or stderr is not None:
             run_path = self.crash_folder / execution.as_identifier().replace(" ", "_")
             run_path.mkdir(parents=True, exist_ok=True)
@@ -1203,7 +1309,6 @@ __all__ = [
     "RegexParser",
     "RebenchParser",
     "MixedResultParser",
-    "TimeParser",
     # Reporters
     "Reporter",
     "CsvReporter",
