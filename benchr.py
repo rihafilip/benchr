@@ -894,42 +894,50 @@ class TUI:
 
 class Reporter(abc.ABC):
     @abc.abstractmethod
-    def report(self, results: list[ExecutionResult]): ...
+    def report(self, result: ExecutionResult): ...
 
     @staticmethod
-    def metrics(results: list[ExecutionResult]) -> list[str]:
+    def metrics(result: ExecutionResult) -> list[str]:
         out = []
 
-        for result in results:
-            for measure in result.measurements:
-                if measure.metric not in out:
-                    out.append(measure.metric)
+        for measure in result.measurements:
+            if measure.metric not in out:
+                out.append(measure.metric)
 
         return out
 
     @staticmethod
-    def measurement_info_columns(results: list[ExecutionResult]) -> list[str]:
+    def measurement_info_columns(result: ExecutionResult) -> list[str]:
         out = []
 
-        for result in results:
-            for measure in result.measurements:
-                for col in measure.measurement_info.keys():
-                    if col not in out:
-                        out.append(col)
+        for measure in result.measurements:
+            for col in measure.measurement_info.keys():
+                if col not in out:
+                    out.append(col)
 
         return out
 
     @staticmethod
-    def info_columns(results: list[ExecutionResult]) -> list[str]:
+    def info_columns(result: ExecutionResult) -> list[str]:
         out = []
 
-        for result in results:
-            for measure in result.measurements:
-                for col in measure.execution.info.keys():
-                    if col not in out:
-                        out.append(col)
+        for measure in result.measurements:
+            for col in measure.execution.info.keys():
+                if col not in out:
+                    out.append(col)
 
         return out
+
+
+class MixedReporter(Reporter):
+    reporters: list[Reporter]
+
+    def __init__(self, *reporters: Reporter) -> None:
+        self.reporters = list(reporters)
+
+    def report(self, result: ExecutionResult):
+        for r in self.reporters:
+            r.report(result)
 
 
 class CsvReporter(Reporter):
@@ -950,9 +958,9 @@ class CsvReporter(Reporter):
     def format_line(self, line: list[str]) -> str:
         return self.separator.join(map(self.escape_text, line)) + "\n"
 
-    def report(self, results: list[ExecutionResult]):
-        info_cols = Reporter.info_columns(results)
-        measurement_info_cols = Reporter.measurement_info_columns(results)
+    def report(self, result: ExecutionResult):
+        info_cols = Reporter.info_columns(result)
+        measurement_info_cols = Reporter.measurement_info_columns(result)
 
         columns = (
             ["benchmark", "suite"]
@@ -966,22 +974,115 @@ class CsvReporter(Reporter):
         with open(self.filepath, "wt") as file:
             file.write(self.format_line(columns))
 
-            for result in results:
-                for measure in result.measurements:
-                    line: list[str] = [
-                        measure.execution.benchmark_name,
-                        measure.execution.suite,
-                    ]
+            for measure in result.measurements:
+                line: list[str] = [
+                    measure.execution.benchmark_name,
+                    measure.execution.suite,
+                ]
 
-                    for col in info_cols:
-                        line.append(measure.execution.info.get(col, ""))
+                for col in info_cols:
+                    line.append(measure.execution.info.get(col, ""))
 
-                    for col in measurement_info_cols:
-                        line.append(measure.measurement_info.get(col, ""))
+                for col in measurement_info_cols:
+                    line.append(measure.measurement_info.get(col, ""))
 
-                    line += [measure.metric, str(measure.value), measure.unit]
+                line += [measure.metric, str(measure.value), measure.unit]
 
-                    file.write(self.format_line(line))
+                file.write(self.format_line(line))
+
+
+class TableReporter(Reporter):
+    def report(self, result: ExecutionResult):
+        info_cols = Reporter.info_columns(result)
+        measurement_info_cols = Reporter.measurement_info_columns(result)
+        metrics = Reporter.metrics(result)
+
+        # Measure widths
+        benchmark_col_w = len("benchmark")
+        suite_col_w = len("suite")
+        info_cols_w = {info: len(info) for info in info_cols}
+        measurement_info_w = {info: len(info) for info in measurement_info_cols}
+        metric_w = len("metric")
+        value_w = len("value")
+        unit_w = len("unit")
+
+        for measure in result.measurements:
+            benchmark_col_w = max(
+                len(measure.execution.benchmark_name), benchmark_col_w
+            )
+            suite_col_w = max(len(measure.execution.suite), suite_col_w)
+
+            for i in info_cols:
+                info_cols_w[i] = max(
+                    len(measure.execution.info.get(i, "")), info_cols_w[i]
+                )
+
+            for i in measurement_info_cols:
+                measurement_info_w[i] = max(
+                    len(measure.measurement_info.get(i, "")), measurement_info_w[i]
+                )
+
+            metric_w = max(len(measure.metric), metric_w)
+            value_w = max(len(str(measure.value)), value_w)
+            unit_w = max(len(measure.unit), unit_w)
+
+        # Print header
+        sep_size = sum(
+            [
+                benchmark_col_w + 2,
+                suite_col_w + 2,
+                sum(info_cols_w.values()),
+                len(info_cols_w) * 2,
+                sum(measurement_info_w.values()),
+                len(measurement_info_w) * 2,
+                metric_w + 2,
+                value_w + 2,
+                unit_w,
+            ]
+        )
+
+        print("\n" + "-" * sep_size)
+        print("benchmark".ljust(benchmark_col_w + 2), end="")
+        print("suite".ljust(suite_col_w + 2), end="")
+
+        for i in info_cols:
+            print(i.ljust(info_cols_w[i] + 2), end="")
+
+        for i in measurement_info_cols:
+            print(i.ljust(measurement_info_w[i] + 2), end="")
+
+        print("metric".ljust(metric_w + 2), end="")
+        print("value".ljust(value_w + 2), end="")
+        print("unit".ljust(unit_w), end="")
+        print("\n" + "-" * sep_size)
+
+        # Print
+        for measure in result.measurements:
+            print(measure.execution.benchmark_name.ljust(benchmark_col_w + 2), end="")
+            print(measure.execution.suite.ljust(suite_col_w + 2), end="")
+
+            for i in info_cols:
+                print(
+                    measure.execution.info.get(i, "").ljust(
+                        info_cols_w[i] + 2,
+                    ),
+                    end="",
+                )
+
+            for i in measurement_info_cols:
+                print(
+                    measure.measurement_info.get(i, "").ljust(
+                        measurement_info_w[i] + 2,
+                    ),
+                    end="",
+                )
+
+            print(measure.metric.ljust(metric_w + 2), end="")
+            print(str(measure.value).ljust(value_w + 2), end="")
+            print(measure.unit.ljust(unit_w + 2), end="")
+            print()
+
+        print("-" * sep_size)
 
 
 # --------------------------------------
@@ -1011,7 +1112,7 @@ class DefaultExecutor(Executor):
     reporter: Reporter
     crash_folder: Path
 
-    results: list[ExecutionResult]
+    result: ExecutionResult
 
     def __init__(self, crash_folder: Path, reporter: Reporter) -> None:
         self.all_executions = None
@@ -1021,7 +1122,7 @@ class DefaultExecutor(Executor):
         self.reporter = reporter
         self.crash_folder = crash_folder
 
-        self.results = []
+        self.result = ExecutionResult()
 
     def execute_all(self, executions: list[Execution]):
         self.all_executions = len(executions)
@@ -1119,13 +1220,18 @@ class DefaultExecutor(Executor):
 
     def finalize(self, execution: Execution, stdout: str, stderr: str) -> None:
         self.finished_executions += 1
-        self.results.append(execution.parser.parse(execution, stdout, stderr))
+        self.result.measurements.extend(
+            execution.parser.parse(execution, stdout, stderr).measurements
+        )
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
-        self.reporter.report(self.results)
+        self.reporter.report(self.result)
+        return False
+
+
         return False
 
 
