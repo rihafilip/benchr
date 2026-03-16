@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from benchr import *
 
 INPUTS = Path(__file__).resolve() / "inputs"

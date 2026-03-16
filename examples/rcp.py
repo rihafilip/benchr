@@ -1,17 +1,9 @@
-from pathlib import Path
 import os
-import shutil
 import tempfile
 from contextlib import ExitStack
+import subprocess
 
-import benchr
-from benchr import (
-    Benchmark,
-    Config,
-    DefaultExecutor,
-    DryExecutor,
-    Suite,
-)
+from benchr import *
 
 CWD = Path("/home/rihafilip/code/r/rcp/rcp")
 # TODO:
@@ -20,21 +12,21 @@ CWD = Path("/home/rihafilip/code/r/rcp/rcp")
 
 
 def check_namespace(Rscript: Path, namespace: str):
-    benchr.run_cmd(
+    subprocess.run(
         [
             Rscript,
             "-e",
             f"""if (!requireNamespace("{namespace}", quietly=TRUE)) quit(status=1)""",
-        ]
+        ],
+        check=True,
     )
 
 
-def main():
+def rcp_main():
     with ExitStack() as estack:
-        params = benchr.parse_params(
+        params = parse_params(
             RSH_HOME=CWD / ".." / "external" / "rsh" / "client" / "rsh",
             R_HOME=CWD / ".." / "external" / "rsh" / "external" / "R",
-            bench_opts="--rcp",
             path_filter="",
             parallel=os.cpu_count(),
             runs=1,
@@ -43,10 +35,9 @@ def main():
 
         RSH_HOME: Path = params.RSH_HOME.resolve()
         R_HOME: Path = params.R_HOME.resolve()
-        bench_opts = params.bench_opts.split()
         path_filter = params.path_filter
         parallel = params.parallel
-        executions = params.runs
+        runs = params.runs
         output = (
             Path(params.output)
             if params.output is not None
@@ -59,56 +50,57 @@ def main():
         R = R_HOME / "bin" / "R"
         Rscript = R_HOME / "bin" / "Rscript"
 
-        benchmarks = list(
-            filter(
-                lambda b: (
-                    b.keys.path.parent != bench_dir
-                    and (path_filter == "" or path_filter not in str(b.keys.path))
+        benchmarks = [
+            b
+            for b in Benchmark.from_folder(bench_dir, extension="R")
+            if b.keys.path.parent != bench_dir  # Only files recursed inside
+            and (path_filter == "" or path_filter not in str(b.keys.path))
+        ]
+
+        conf = (
+            suite(
+                name="RCPSuite",
+                benchmarks=benchmarks,
+                parser=RebenchParser(),
+                working_directory=CWD,
+                command=lambda _, benchmark: (
+                    [
+                        str(R),
+                        "--slave",
+                        "--no-restore",
+                        "-f",
+                        str(harness_bin),
+                        "--args",
+                    ]
+                    + ["--output-dir", str(output)]
+                    + ["--runs", str(executions)]
+                    + ["--rcp"]
+                    + [str(benchmark.keys.path.with_suffix(""))]
                 ),
-                Benchmark.from_folder(bench_dir, extension="R"),
             )
+            .time("maximum_resident_size")
+            .to_config()
         )
+        if runs != 1:
+            conf = conf.runs(runs)
 
-        RCPSuite = (
-            benchr.config(
-                Suite(
-                    name="RCPSuite",
-                    benchmarks=benchmarks,
-                    parser=benchr.RebenchParser(),
-                    working_directory=CWD,
-                    command=lambda _, benchmark: (
-                        [
-                            str(R),
-                            "--slave",
-                            "--no-restore",
-                            "-f",
-                            str(harness_bin),
-                            "--args",
-                        ]
-                        + ["--output-dir", str(output)]
-                        + ["--runs", str(executions)]
-                        + bench_opts
-                        + [str(benchmark.keys.path.with_suffix(""))]
-                    ),
-                )
+        executions = conf.get_executions(params)
+
+        check_namespace(Rscript, "microbenchmark")
+        check_namespace(Rscript, "rcp")
+
+        if parallel > 1:
+            executor = ParallelExecutor(
+                parallel, output / "crash", CsvReporter(output / "result.csv")
             )
-            .matrix("RCP_ON", 0, 1, env=True)
-            .time("maximum_resident_size", "average_resident_size")
-        )
+        else:
+            executor = DefaultExecutor(
+                output / "crash", CsvReporter(output / "result.csv")
+            )
 
-        executions = list(RCPSuite.to_executions(params))
-
-        dry_executor = DryExecutor()
-        dry_executor.execute_all(executions)
-
-        # check_namespace(Rscript, "microbenchmark")
-        # check_namespace(Rscript, "rcp")
-        #
-        # with DefaultExecutor(
-        #     output / "crash", benchr.CsvFormatter(output / "result.csv")
-        # ) as executor:
-        # executor.execute_all(list(executions))
+        with executor:
+            executor.execute_all(list(executions))
 
 
 if __name__ == "__main__":
-    main()
+    rcp_main()
