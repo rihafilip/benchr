@@ -8,7 +8,7 @@ conf = (
     suite(
         name="LoxSuite",
         working_directory=lambda ps, _: ps.cwd / "benchmarks",
-        parser=LastLineParser(PlainSecondsParser()),
+        parser=LastLineParser(PlainFloatParser("s")),
         command=lambda ps, bench: [
             ps.lox,
             str(bench.keys.path),

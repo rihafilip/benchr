@@ -721,18 +721,25 @@ class ResultParser(abc.ABC):
     ) -> ExecutionResult: ...
 
 
-class PlainSecondsParser(ResultParser):
+class PlainFloatParser(ResultParser):
     """
     Try to parse simple floats on each line as seconds
     """
+
+    unit: str
+
+    def __init__(self, unit: str) -> None:
+        self.unit = unit
 
     def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
         result = ExecutionResult()
 
         for line in stdout.split("\n"):
             try:
-                time = float(line) * 1000
-                result.measurements.append(Measurement.runtime(execution, time, "ms"))
+                time = float(line)
+                result.measurements.append(
+                    Measurement.runtime(execution, time, self.unit)
+                )
             except ValueError:
                 pass
 
@@ -1658,7 +1665,7 @@ __all__ = [
     "ExecutionResult",
     # Parsers
     "ResultParser",
-    "PlainSecondsParser",
+    "PlainFloatParser",
     "LastLineParser",
     "RegexParser",
     "RebenchParser",
