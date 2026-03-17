@@ -671,14 +671,52 @@ class Measurement:
 class ExecutionResult:
     measurements: list[Measurement] = dataclasses.field(default_factory=list)
 
+    def info_columns(self) -> list[str]:
+        """
+        Get all info categories on all Executions
+        """
+        out = []
+
+        for measure in self.measurements:
+            for col in measure.execution.info.keys():
+                if col not in out:
+                    out.append(col)
+
+        return out
+
+    def measurement_info_columns(self) -> list[str]:
+        """
+        Get all info categories on all measurements
+        """
+        out = []
+
+        for measure in self.measurements:
+            for col in measure.measurement_info.keys():
+                if col not in out:
+                    out.append(col)
+
+        return out
+
+    def metrics(self) -> list[str]:
+        """
+        Get all metrics in the result
+        """
+        out = []
+
+        for measure in self.measurements:
+            if measure.metric not in out:
+                out.append(measure.metric)
+
+        return out
+
     def to_data_frame(self, pivoted: bool = False, units: Optional[bool] = None):
         import pandas as pd
 
         if units is None:
             units = not pivoted
 
-        info_cols = Reporter.info_columns(self)
-        measurement_info_cols = Reporter.measurement_info_columns(self)
+        info_cols = self.info_columns()
+        measurement_info_cols = self.measurement_info_columns()
 
         rows = []
         for m in self.measurements:
@@ -1056,47 +1094,6 @@ class Reporter(abc.ABC):
     @abc.abstractmethod
     def report(self, result: ExecutionResult): ...
 
-    @staticmethod
-    def metrics(result: ExecutionResult) -> list[str]:
-        """
-        Get all metrics in the result
-        """
-        out = []
-
-        for measure in result.measurements:
-            if measure.metric not in out:
-                out.append(measure.metric)
-
-        return out
-
-    @staticmethod
-    def measurement_info_columns(result: ExecutionResult) -> list[str]:
-        """
-        Get all info categories on all measurements
-        """
-        out = []
-
-        for measure in result.measurements:
-            for col in measure.measurement_info.keys():
-                if col not in out:
-                    out.append(col)
-
-        return out
-
-    @staticmethod
-    def info_columns(result: ExecutionResult) -> list[str]:
-        """
-        Get all info categories on all Executions
-        """
-        out = []
-
-        for measure in result.measurements:
-            for col in measure.execution.info.keys():
-                if col not in out:
-                    out.append(col)
-
-        return out
-
 
 class MixedReporter(Reporter):
     """
@@ -1136,8 +1133,8 @@ class CsvReporter(Reporter):
         return self.separator.join(map(self.escape_text, line)) + "\n"
 
     def report(self, result: ExecutionResult):
-        info_cols = Reporter.info_columns(result)
-        measurement_info_cols = Reporter.measurement_info_columns(result)
+        info_cols = result.info_columns()
+        measurement_info_cols = result.measurement_info_columns()
 
         columns = (
             ["benchmark", "suite"]
@@ -1174,8 +1171,8 @@ class TableReporter(Reporter):
     """
 
     def report(self, result: ExecutionResult):
-        info_cols = Reporter.info_columns(result)
-        measurement_info_cols = Reporter.measurement_info_columns(result)
+        info_cols = result.info_columns()
+        measurement_info_cols = result.measurement_info_columns()
 
         # Measure widths
         benchmark_col_w = len("benchmark")
