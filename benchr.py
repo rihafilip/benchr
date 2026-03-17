@@ -202,10 +202,7 @@ class BenchmarkCollection[This](abc.ABC):
 
     def matrix[T](
         self,
-        name: str,
-        *parameters: T,
-        working_directory: Optional[Callable[[T], Path]] = None,
-        env: Optional[Callable[[T], Env]] | str | Literal[True] = None,
+        matrix: "Matrix[T]",
     ) -> This:
         """
         Add a matrix parameter. Each benchmark is going to be duplicated with
@@ -217,21 +214,13 @@ class BenchmarkCollection[This](abc.ABC):
         If `env` is not None, it will add a new environment variables to the
         benchmarks environment.
         """
-        return self.apply_suite_decorator(
-            lambda suite: MatrixSuite(
-                name,
-                suite,
-                parameters,
-                working_directory,
-                env,
-            )
-        )
+        return self.apply_suite_decorator(matrix.build)
 
     def runs(self, value: int) -> This:
         """
         Run each benchmark `value` times without any other modification
         """
-        return self.matrix("run", *range(1, value + 1))
+        return self.matrix(Matrix("run", range(1, value + 1)))
 
     def time(
         self, *columns: TimeBinutilColumns, time_bin: Optional[str] = None
@@ -331,7 +320,7 @@ def suite(
     name: str,
     benchmarks: Sequence[Benchmark | str] | Callable[[Parameters], list[Benchmark]],
     *,
-    command: Optional[Callable[[Parameters, Benchmark], Command]],
+    command: Optional[Callable[[Parameters, Benchmark], Command]] = None,
     working_directory: Optional[Callable[[Parameters, Benchmark], Path] | Path] = None,
     env: Callable[[Parameters, Benchmark], Env] | Env = {},
     parser: Optional["ResultParser"] = None,
@@ -391,56 +380,139 @@ class SuiteDecorator(Suite):
         ...
 
 
+type MatrixCallable[T, R] = Callable[[Parameters, Execution.Incomplete, T], R]
+
+
 class MatrixSuite[T](SuiteDecorator):
     name: str
     parameters: Sequence[T]
 
-    matrix_working_directory: Optional[Callable[[T], Path]]
-    matrix_env: Callable[[T], Env]
+    matrix_command: Optional[MatrixCallable[T, Command]]
+    matrix_working_directory: Optional[MatrixCallable[T, Path]]
+    matrix_env: MatrixCallable[T, Env]
+    matrix_info: Optional[Callable[[T], dict[str, str]]]
 
     def __init__(
         self,
         name: str,
         parent: Suite,
         parameters: Sequence[T],
-        working_directory: Optional[Callable[[T], Path]] = None,
-        env: Optional[Callable[[T], Env]] | str | Literal[True] = None,
+        matrix_command: Optional[MatrixCallable[T, Command]],
+        matrix_working_directory: Optional[MatrixCallable[T, Path]],
+        matrix_env: MatrixCallable[T, Env],
+        matrix_info: Optional[Callable[[T], dict[str, str]]],
     ) -> None:
         super().__init__(parent)
 
         self.name = name
         self.parameters = parameters
 
-        self.matrix_working_directory = working_directory
-
-        if env is None:
-            self.matrix_env = const({})
-        elif env is True:
-            self.matrix_env = lambda p: {name: str(p)}
-        elif isinstance(env, str):
-            self.matrix_env = lambda p: {env: str(p)}
-        else:
-            self.matrix_env = env
+        self.matrix_command = matrix_command
+        self.matrix_working_directory = matrix_working_directory
+        self.matrix_env = matrix_env
+        self.matrix_info = matrix_info
 
     def extend_execution(
         self, parameters: Parameters, execution: Execution.Incomplete
     ) -> Iterator[Execution.Incomplete]:
         for p in self.parameters:
-            e = execution.env | self.matrix_env(p)
+            if self.matrix_command is not None:
+                c = self.matrix_command(parameters, execution, p)
+            else:
+                c = execution.command
+
+            e = execution.env | self.matrix_env(parameters, execution, p)
 
             if self.matrix_working_directory is not None:
-                wd = self.matrix_working_directory(p)
+                wd = self.matrix_working_directory(parameters, execution, p)
             else:
                 wd = execution.working_directory
 
-            i = execution.info | {self.name: str(p)}
+            if self.matrix_info is not None:
+                i = execution.info | self.matrix_info(p)
+            else:
+                i = execution.info | {self.name: str(p)}
 
             yield dataclasses.replace(
                 execution,
+                command=c,
                 env=e,
                 working_directory=wd,
                 info=i,
             )
+
+
+@dataclass
+class Matrix[T]:
+    """
+    The MatrixSuite builder
+    """
+
+    name: str
+    parameters: Sequence[T]
+
+    matrix_command: Optional[MatrixCallable[T, Command]] = None
+    matrix_working_directory: Optional[MatrixCallable[T, Path]] = None
+    matrix_env: MatrixCallable[T, Env] = const({})
+    matrix_info: Optional[Callable[[T], dict[str, str]]] = None
+
+    def __init__(
+        self,
+        name: str,
+        parameters: Sequence[T],
+    ) -> None:
+        self.name = name
+        self.parameters = parameters
+
+    def command(self, callback: Callable[[T], Command]):
+        return self.command_full(lambda ps, ex, p: callback(p))
+
+    def command_full(self, callback: MatrixCallable[T, Command]):
+        if self.matrix_command is not None:
+            raise ValueError("Multiple definitions of command")
+
+        return dataclasses.replace(self, matrix_command=callback)
+
+    def working_directory(self, callback: Callable[[T], Path]):
+        return self.working_directory_full(lambda ps, ex, p: callback(p))
+
+    def working_directory_full(self, callback: MatrixCallable[T, Path]):
+        if self.matrix_working_directory is not None:
+            raise ValueError("Multiple definitions of working directory")
+
+        return dataclasses.replace(self, matrix_working_directory=callback)
+
+    def env(self, name: Optional[str]):
+        if name is None:
+            name = self.name
+
+        return self.env_callback_full(lambda ps, ex, p: {name: str(p)})
+
+    def env_callback(self, callback: Callable[[T], Env]):
+        return self.env_callback_full(lambda ps, ex, p: callback(p))
+
+    def env_callback_full(self, callback: MatrixCallable[T, Env]):
+        prev_mk_env = self.matrix_env
+        mk_env = lambda ps, ex, p: prev_mk_env(ps, ex, p) | callback(ps, ex, p)
+
+        return dataclasses.replace(self, matrix_env=mk_env)
+
+    def info(self, callback: Callable[[T], dict[str, str]]):
+        if self.matrix_info is not None:
+            raise ValueError("Multiple definitions of info")
+
+        return dataclasses.replace(self, matrix_info=callback)
+
+    def build(self, suite: Suite) -> MatrixSuite:
+        return MatrixSuite(
+            name=self.name,
+            parent=suite,
+            parameters=self.parameters,
+            matrix_command=self.matrix_command,
+            matrix_working_directory=self.matrix_working_directory,
+            matrix_env=self.matrix_env,
+            matrix_info=self.matrix_info,
+        )
 
 
 class TimeSuite(SuiteDecorator):
@@ -1661,6 +1733,7 @@ __all__ = [
     # Suite decorators
     "SuiteDecorator",
     "MatrixSuite",
+    "Matrix",
     "TimeSuite",
     # Configuration
     "Config",
