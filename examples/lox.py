@@ -1,4 +1,8 @@
+import numpy as np
+import pandas as pd
 from benchr import *
+
+pd.options.display.float_format = lambda x: f"{int(x)}" if x == int(x) else f"{x:.2f}"
 
 conf = (
     suite(
@@ -13,12 +17,10 @@ conf = (
             ps.cwd / "benchmarks", extension="lox"
         ),
     )
+    # .runs(5)
     .runs(2)
     .time(
         "maximum_resident_size",
-        "average_resident_size",
-        "user_time",
-        "system_time",
         "clock_time",
     )
     .to_config()
@@ -26,4 +28,25 @@ conf = (
 
 
 if __name__ == "__main__":
-    main(conf, ["lox"], {"cwd": Path(__file__).parent})
+    results = main(
+        conf,
+        ["lox"],
+        {
+            "cwd": Path(__file__).parent,
+        },
+    )
+    assert results is not None
+
+    df = results.to_data_frame()
+
+    df["value"] = np.where(
+        df["metric"] == "clock_time", df["value"] * 1000, df["value"]
+    )
+    df.drop("unit", axis=1, inplace=True)
+    df = df.pivot(columns="metric")
+    df.columns = df.columns.droplevel(0)
+    df = df.groupby(["benchmark", "suite"]).mean()
+    df.reset_index(inplace=True)
+    print(df)
+
+    df.to_csv("./output/pd.csv", index=False)
