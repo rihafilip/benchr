@@ -34,6 +34,9 @@ class Parameters(SimpleNamespace):
     def __or__(self, other: "Parameters") -> "Parameters":
         return Parameters(**vars(self), **vars(other))
 
+    def __getitem__(self, name: str) -> Any:
+        return getattr(self, name)
+
     @staticmethod
     def from_namespace(ns: argparse.Namespace) -> "Parameters":
         """
