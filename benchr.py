@@ -606,6 +606,12 @@ class Config(BenchmarkCollection["Config"]):
     def __init__(self, *suites: Suite) -> None:
         self.suites = list(suites)
 
+    def parser(self, default_parser: "ResultParser") -> "Config":
+        if self.default_parser is not None:
+            raise ValueError("Multiple definitions of default parser")
+
+        return dataclasses.replace(self, default_parser=default_parser)
+
     def command(
         self,
         default_command: Callable[[Parameters, Execution.Incomplete], Command]
