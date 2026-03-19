@@ -1,14 +1,17 @@
 import abc
 import argparse
 import dataclasses
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
+from resource import struct_rusage
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Literal, Optional, Sequence
@@ -45,9 +48,8 @@ class Parameters(SimpleNamespace):
         return Parameters(**vars(ns))
 
 
-TimeBinutilColumns = Literal[
+TimeColumns = Literal[
     "maximum_resident_size",
-    "average_resident_size",
     "user_time",
     "system_time",
     "clock_time",
@@ -74,6 +76,9 @@ class Execution:
     env: Env
 
     info: dict[str, str]
+
+    rusage: Optional[struct_rusage] = None
+    elapsed_time: Optional[float] = None
 
     def as_identifier(self) -> str:
         id = f"{self.suite},{self.benchmark_name}"
@@ -226,18 +231,15 @@ class BenchmarkCollection[This](abc.ABC):
         """
         return self.matrix(Matrix("run", range(1, value + 1)))
 
-    def time(
-        self, *columns: TimeBinutilColumns, time_bin: Optional[str] = None
-    ) -> This:
+    def time(self, *columns: TimeColumns) -> This:
         """
-        Wrap the call to benchmark with the call to `time` (not the shell
-        utility), extracting the information specified by `columns`.
+        Measure resource usage of the benchmarked process, extracting the
+        information specified by `columns`.
         """
         return self.apply_suite_decorator(
             lambda suite: TimeSuite(
                 suite,
                 list(columns),
-                time_bin=time_bin,
             )
         )
 
@@ -522,50 +524,14 @@ class Matrix[T]:
 class TimeSuite(SuiteDecorator):
     parent: Suite
     parser: "ResultParser"
-    format: str
-    time_bin: str
 
     def __init__(
         self,
         parent: Suite,
-        columns: list[TimeBinutilColumns],
-        time_bin: Optional[str] = None,
+        columns: list[TimeColumns],
     ) -> None:
         super().__init__(parent)
-
-        self.parser = time_parser(columns)
-        self.format = TimeSuite.make_format(columns)
-
-        if time_bin is None:
-            time_bin = shutil.which("time")
-            if time_bin is None:
-                raise ValueError("Unable to find `time` binary")
-
-        self.time_bin = time_bin
-
-    @staticmethod
-    def make_format(columns: list[TimeBinutilColumns]) -> str:
-        format = ""
-        for col in columns:
-            if col == "maximum_resident_size":
-                format += "maximum_resident_size: %M\n"
-
-            elif col == "average_resident_size":
-                format += "average_resident_size: %t\n"
-
-            elif col == "user_time":
-                format += "user_time: %U\n"
-
-            elif col == "system_time":
-                format += "system_time: %S\n"
-
-            elif col == "clock_time":
-                format += "clock_time: %e\n"
-
-            else:
-                raise ValueError(f"Unknown Time column {col}")
-
-        return format
+        self.parser = ResourceUsageParser(columns)
 
     def extend_execution(
         self, parameters: Parameters, execution: Execution.Incomplete
@@ -573,7 +539,6 @@ class TimeSuite(SuiteDecorator):
         if execution.command is None:
             raise ValueError("TimeSuite cannot extend an empty command")
 
-        execution.command = [self.time_bin, "-f", self.format] + execution.command
         if execution.parser is None:
             execution.parser = self.parser
         else:
@@ -1087,44 +1052,49 @@ class MixedResultParser(ResultParser):
         return result
 
 
-def time_parser(columns: list[TimeBinutilColumns]) -> ResultParser:
+class ResourceUsageParser(ResultParser):
     """
-    Create a parser for the `time` binutil
+    Extract resource usage metrics from execution.rusage and execution.elapsed_time
+    populated by the executor via os.wait4().
     """
-    parsers = []
 
-    def mk_parser(column_name: str, unit: str) -> RegexParser:
-        return RegexParser(
-            column_name,
-            re.compile(
-                rf"^{column_name}: (\d+\.?\d*)$",
-                re.MULTILINE,
-            ),
-            "stderr",
-            match_group=1,
-            unit=unit,
-        )
+    # on macOS ru_maxrss is in bytes, on Linux it is in kB
+    _MAXRSS_DIVISOR = 1024 if sys.platform == "darwin" else 1
 
-    for col in columns:
-        if col == "maximum_resident_size":
-            parsers.append(mk_parser("maximum_resident_size", "kB"))
+    columns: list[TimeColumns]
 
-        elif col == "average_resident_size":
-            parsers.append(mk_parser("average_resident_size", "kB"))
+    def __init__(self, columns: list[TimeColumns]) -> None:
+        self.columns = columns
 
-        elif col == "user_time":
-            parsers.append(mk_parser("user_time", "s"))
+    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+        result = ExecutionResult()
 
-        elif col == "system_time":
-            parsers.append(mk_parser("system_time", "s"))
+        if execution.rusage is None:
+            return result
 
-        elif col == "clock_time":
-            parsers.append(mk_parser("clock_time", "s"))
+        for col in self.columns:
+            if col == "maximum_resident_size":
+                value = float(execution.rusage.ru_maxrss // self._MAXRSS_DIVISOR)
+                unit = "kB"
+            elif col == "user_time":
+                value = execution.rusage.ru_utime
+                unit = "s"
+            elif col == "system_time":
+                value = execution.rusage.ru_stime
+                unit = "s"
+            elif col == "clock_time":
+                if execution.elapsed_time is None:
+                    continue
+                value = execution.elapsed_time
+                unit = "s"
+            else:
+                raise ValueError(f"Unknown Time column {col}")
 
-        else:
-            raise ValueError(f"Unknown Time column {col}")
+            result.measurements.append(
+                Measurement(execution, col, value, unit, {})
+            )
 
-    return MixedResultParser(*parsers)
+        return result
 
 
 # --------------------------------------
@@ -1411,15 +1381,12 @@ class DefaultExecutor(Executor):
 
         self.start_execution(execution)
 
-        proc = None
         try:
             # TODO: group, process group?
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 execution.command,
-                # run spec
-                capture_output=True,
-                check=False,
-                # Popen spec
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 stdin=None,
                 shell=False,
                 cwd=execution.working_directory,
@@ -1427,19 +1394,33 @@ class DefaultExecutor(Executor):
                 text=True,
             )
 
-            if proc.returncode != 0:
+            t0 = _time.monotonic()
+            _, status, rusage = os.wait4(proc.pid, 0)
+            elapsed = _time.monotonic() - t0
+
+            stdout = proc.stdout.read()
+            stderr = proc.stderr.read()
+            proc.stdout.close()
+            proc.stderr.close()
+
+            execution.rusage = rusage
+            execution.elapsed_time = elapsed
+
+            returncode = os.waitstatus_to_exitcode(status)
+
+            if returncode != 0:
                 self.error_execution(
                     execution,
-                    f"Program ended with non-zero return code ({proc.returncode})",
-                    stdout=proc.stdout,
-                    stderr=proc.stderr,
+                    f"Program ended with non-zero return code ({returncode})",
+                    stdout=stdout,
+                    stderr=stderr,
                 )
                 return
 
             self.finalize(
                 execution,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                stdout=stdout,
+                stderr=stderr,
             )
 
         except OSError as e:
@@ -1726,7 +1707,7 @@ __all__ = [
     "Env",
     "Command",
     "Parameters",
-    "TimeBinutilColumns",
+    "TimeColumns",
     # Input definitions
     "Execution",
     "Benchmark",
@@ -1751,7 +1732,7 @@ __all__ = [
     "RegexParser",
     "RebenchParser",
     "MixedResultParser",
-    "time_parser",
+    "ResourceUsageParser",
     # Reporters
     "Reporter",
     "MixedReporter",
