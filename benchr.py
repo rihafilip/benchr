@@ -1186,10 +1186,10 @@ class ResourceUsageParser(ResultParser):
         self.unit = unit
 
     def parse(self, process_result: ProcessResult) -> ExecutionResult:
-        if process_result.runtime is None:
+        if process_result.rusage is None:
             return ExecutionResult()
 
-        value = getattr(process_result.runtime, self.field)
+        value = getattr(process_result.rusage, self.field)
 
         # MacOS reports in B, not kB
         if sys.platform == "darwin" and self.field == "ru_maxrss":
