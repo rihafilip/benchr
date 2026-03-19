@@ -124,11 +124,13 @@ Recommenderlab = suite(
 
 
 conf = Config(
-    AreWeFast,
-    Shootout,
-    RealThing,
-    Kaggles,
-    Recommenderlab,
+    [
+        AreWeFast,
+        Shootout,
+        RealThing,
+        Kaggles,
+        Recommenderlab,
+    ]
 ).env(LOCALE)
 
 if __name__ == "__main__":
