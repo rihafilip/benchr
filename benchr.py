@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
 from resource import struct_rusage
-from threading import Lock
+from threading import Lock, Timer
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Literal, Optional, Sequence
 
@@ -77,6 +77,8 @@ class Execution:
 
     info: dict[str, str]
 
+    timeout: Optional[float] = None
+
     rusage: Optional[struct_rusage] = None
     elapsed_time: Optional[float] = None
 
@@ -107,6 +109,8 @@ class Execution:
 
         info: dict[str, str]
 
+        timeout: Optional[float] = None
+
         def finalize(self) -> "Execution":
             if self.parser is None:
                 raise ValueError(
@@ -131,6 +135,7 @@ class Execution:
                 working_directory=self.working_directory,
                 env=self.env,
                 info=self.info,
+                timeout=self.timeout,
             )
 
 
@@ -230,6 +235,15 @@ class BenchmarkCollection[This](abc.ABC):
         Run each benchmark `value` times without any other modification
         """
         return self.matrix(Matrix("run", range(1, value + 1)))
+
+    def timeout(self, seconds: float) -> This:
+        """
+        Set a per-run timeout in seconds. If a run exceeds this duration,
+        it will be killed and reported as an error.
+        """
+        return self.apply_suite_decorator(
+            lambda suite: TimeoutSuite(suite, seconds)
+        )
 
     def time(self, *columns: TimeColumns) -> This:
         """
@@ -546,6 +560,20 @@ class TimeSuite(SuiteDecorator):
         yield execution
 
 
+class TimeoutSuite(SuiteDecorator):
+    seconds: float
+
+    def __init__(self, parent: Suite, seconds: float) -> None:
+        super().__init__(parent)
+        self.seconds = seconds
+
+    def extend_execution(
+        self, parameters: Parameters, execution: Execution.Incomplete
+    ) -> Iterator[Execution.Incomplete]:
+        execution.timeout = self.seconds
+        yield execution
+
+
 # --------------------------------------
 #          CONFIGURATION
 # --------------------------------------
@@ -667,6 +695,7 @@ class Config(BenchmarkCollection["Config"]):
                         working_directory=exe.working_directory,
                         env=exe.env,
                         info=exe.info,
+                        timeout=exe.timeout,
                     )
                 )
 
@@ -1394,14 +1423,39 @@ class DefaultExecutor(Executor):
                 text=True,
             )
 
-            t0 = _time.monotonic()
-            _, status, rusage = os.wait4(proc.pid, 0)
-            elapsed = _time.monotonic() - t0
+            timed_out = False
+
+            def kill_on_timeout():
+                nonlocal timed_out
+                timed_out = True
+                proc.kill()
+
+            timer = None
+            if execution.timeout is not None:
+                timer = Timer(execution.timeout, kill_on_timeout)
+                timer.start()
+
+            try:
+                t0 = _time.monotonic()
+                _, status, rusage = os.wait4(proc.pid, 0)
+                elapsed = _time.monotonic() - t0
+            finally:
+                if timer is not None:
+                    timer.cancel()
 
             stdout = proc.stdout.read()
             stderr = proc.stderr.read()
             proc.stdout.close()
             proc.stderr.close()
+
+            if timed_out:
+                self.error_execution(
+                    execution,
+                    f"Timeout after {execution.timeout}s",
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+                return
 
             execution.rusage = rusage
             execution.elapsed_time = elapsed
@@ -1720,6 +1774,7 @@ __all__ = [
     "MatrixSuite",
     "Matrix",
     "TimeSuite",
+    "TimeoutSuite",
     # Configuration
     "Config",
     # Result definitions
