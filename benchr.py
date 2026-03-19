@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
@@ -1802,6 +1802,7 @@ class ParallelExecutor(DefaultExecutor):
     """
 
     pool: ThreadPoolExecutor
+    futures: list[Future]
     lock: Lock
     in_process_runs: int
     last_info: Optional[str]
@@ -1810,18 +1811,26 @@ class ParallelExecutor(DefaultExecutor):
         super().__init__(crash_folder, reporter)
 
         self.pool = ThreadPoolExecutor(max_workers=ncores)
+        self.futures = []
         self.lock = Lock()
         self.in_process_runs = 0
         self.last_info = None
 
     def execute(self, execution: Execution):
-        self.pool.submit(super().execute, execution)
+        future = self.pool.submit(super().execute, execution)
+        self.futures.append(future)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
         self.pool.shutdown(wait=True)
+        exceptions = [
+            e for e in map(lambda f: f.exception(None), self.futures) if e is not None
+        ]
+
+        if len(exceptions) != 0:
+            raise ExceptionGroup("In ParallelExecutor:", exceptions)  # type: ignore
         super().__exit__(*args)
         return False
 
