@@ -12,6 +12,9 @@ from pprint import pprint
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Literal, Optional, Sequence
+import os
+import time
+import resource
 
 # --------------------------------------
 #           HELPERS
@@ -54,6 +57,28 @@ TimeBinutilColumns = Literal[
 ]
 
 
+@dataclass
+class SuccesfulProcessResult:
+    execution: "Execution"
+    stdout: str
+    stderr: str
+    rusage: Optional[resource.struct_rusage]
+
+
+@dataclass
+class FailedProcessResult:
+    execution: "Execution"
+    stdout: Optional[str]
+    stderr: Optional[str]
+    rusage: Optional[resource.struct_rusage]
+
+    returncode: int
+    reason: Literal["timed_out", "non_zero_returncode"] | str
+
+
+ProcessResult = SuccesfulProcessResult | FailedProcessResult
+
+
 # --------------------------------------
 #          INPUT DEFINITIONS
 # --------------------------------------
@@ -72,6 +97,8 @@ class Execution:
     command: Command
     working_directory: Path
     env: Env
+
+    timeout: Optional[float]
 
     info: dict[str, str]
 
@@ -100,6 +127,8 @@ class Execution:
         working_directory: Optional[Path]
         env: Env
 
+        timeout: Optional[float]
+
         info: dict[str, str]
 
         def finalize(self) -> "Execution":
@@ -125,6 +154,7 @@ class Execution:
                 command=self.command,
                 working_directory=self.working_directory,
                 env=self.env,
+                timeout=self.timeout,
                 info=self.info,
             )
 
@@ -316,6 +346,7 @@ class BaseSuite(Suite):
                 parser=self.parser,
                 working_directory=working_directory,
                 env=env,
+                timeout=None,
                 info={},
             )
 
@@ -693,18 +724,7 @@ class Config(BenchmarkCollection["Config"]):
 
                 exe.env = self.default_env(parameters, exe) | exe.env
 
-                res.append(
-                    Execution(
-                        benchmark_name=exe.benchmark.name,
-                        suite=exe.suite,
-                        parser=exe.parser,
-                        command=exe.command,
-                        working_directory=exe.working_directory,
-                        env=exe.env,
-                        info=exe.info,
-                    )
-                )
-
+                res.append(exe.finalize())
         return res
 
     def apply_suite_decorator(
@@ -837,14 +857,13 @@ class ResultParser(abc.ABC):
     """
 
     @abc.abstractmethod
-    def parse(
-        self, execution: Execution, stdout: str, stderr: str
-    ) -> ExecutionResult: ...
+    def parse(self, process_result: ProcessResult) -> ExecutionResult: ...
 
 
 class PlainFloatParser(ResultParser):
     """
-    Try to parse simple floats on each line as seconds
+    Try to parse simple floats on each line as seconds. Only on succesful
+    runs.
     """
 
     unit: str
@@ -852,14 +871,17 @@ class PlainFloatParser(ResultParser):
     def __init__(self, unit: str) -> None:
         self.unit = unit
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        if isinstance(process_result, FailedProcessResult):
+            return ExecutionResult()
+
         result = ExecutionResult()
 
-        for line in stdout.split("\n"):
+        for line in process_result.stdout.split("\n"):
             try:
                 time = float(line)
                 result.measurements.append(
-                    Measurement.runtime(execution, time, self.unit)
+                    Measurement.runtime(process_result.execution, time, self.unit)
                 )
             except ValueError:
                 pass
@@ -869,7 +891,7 @@ class PlainFloatParser(ResultParser):
 
 class LastLineParser(ResultParser):
     """
-    Only parse the last non-empty line
+    Only parse the last non-empty line of succesful runs
     """
 
     subparser: ResultParser
@@ -877,23 +899,32 @@ class LastLineParser(ResultParser):
     def __init__(self, subparser: ResultParser) -> None:
         self.subparser = subparser
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        if isinstance(process_result, FailedProcessResult):
+            return ExecutionResult()
+
         stdout_line = ""
-        for stdout_line in reversed(stdout.split("\n")):
+        for stdout_line in reversed(process_result.stdout.split("\n")):
             if stdout_line.strip() != "":
                 break
 
         stderr_line = ""
-        for stderr_line in reversed(stderr.split("\n")):
+        for stderr_line in reversed(process_result.stderr.split("\n")):
             if stderr_line.strip() != "":
                 break
 
-        return self.subparser.parse(execution, stdout_line, stderr_line)
+        return self.subparser.parse(
+            dataclasses.replace(
+                process_result,
+                stdout=stdout_line,
+                stderr=stderr_line,
+            )
+        )
 
 
 class RegexParser(ResultParser):
     """
-    Parse the output based on a regex
+    Parse the output of a succesful run based on a regex
     """
 
     type MatchGroup = str | int
@@ -936,16 +967,19 @@ class RegexParser(ResultParser):
 
         self.iterations = iterations
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        if isinstance(process_result, FailedProcessResult):
+            return ExecutionResult()
+
         result = ExecutionResult()
         iteration = 1
 
         if self.output == "stdout":
-            outputs = [stdout]
+            outputs = [process_result.stdout]
         elif self.output == "stderr":
-            outputs = [stderr]
+            outputs = [process_result.stderr]
         elif self.output == "both":
-            outputs = [stdout, stderr]
+            outputs = [process_result.stdout, process_result.stderr]
         else:
             raise ValueError(f"Unknown output type {self.output}")
 
@@ -970,7 +1004,7 @@ class RegexParser(ResultParser):
 
                 result.measurements.append(
                     Measurement(
-                        execution,
+                        process_result.execution,
                         self.metric,
                         value,
                         unit,
@@ -1013,11 +1047,14 @@ class RebenchParser(ResultParser):
         + r"(?P<unit>[a-zA-Z]+)"
     )
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        if process_result.stdout is None:
+            return ExecutionResult()
+
         result = ExecutionResult()
         iteration = 0
 
-        for line in stdout.split("\n"):
+        for line in process_result.stdout.split("\n"):
             match = self.re_log_line.match(line)
             if match is not None:
                 # Match runtime
@@ -1032,7 +1069,7 @@ class RebenchParser(ResultParser):
 
                 result.measurements.append(
                     Measurement(
-                        execution,
+                        process_result.execution,
                         "runtime",
                         time,
                         "ms",
@@ -1052,7 +1089,7 @@ class RebenchParser(ResultParser):
                 # Add measurement
                 result.measurements.append(
                     Measurement(
-                        execution,
+                        process_result.execution,
                         criterion,
                         value,
                         unit,
@@ -1078,11 +1115,11 @@ class MixedResultParser(ResultParser):
     def __init__(self, *parsers: ResultParser) -> None:
         self.parsers = list(parsers)
 
-    def parse(self, execution: Execution, stdout: str, stderr: str) -> ExecutionResult:
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
         result = ExecutionResult()
 
         for parser in self.parsers:
-            result.measurements += parser.parse(execution, stdout, stderr).measurements
+            result.measurements += parser.parse(process_result).measurements
 
         return result
 
@@ -1403,7 +1440,14 @@ class DefaultExecutor(Executor):
         cmd = shutil.which(execution.command[0])
         if cmd is None:
             self.error_execution(
-                execution, f"Command not found ({execution.command[0]})"
+                FailedProcessResult(
+                    execution=execution,
+                    stdout=None,
+                    stderr=None,
+                    rusage=None,
+                    returncode=0,
+                    reason=f"Command not found ({execution.command[0]})",
+                )
             )
             return
 
@@ -1411,39 +1455,75 @@ class DefaultExecutor(Executor):
 
         self.start_execution(execution)
 
-        proc = None
         try:
-            # TODO: group, process group?
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 execution.command,
-                # run spec
-                capture_output=True,
-                check=False,
-                # Popen spec
-                stdin=None,
-                shell=False,
                 cwd=execution.working_directory,
                 env=execution.env,
+                stdin=None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
+                shell=False,
             )
 
-            if proc.returncode != 0:
-                self.error_execution(
-                    execution,
-                    f"Program ended with non-zero return code ({proc.returncode})",
-                    stdout=proc.stdout,
-                    stderr=proc.stderr,
+            rusage = None
+            timed_out = False
+            if execution.timeout is not None:
+                endtime = time.monotonic() + execution.timeout
+
+                # Busy wait
+                while True:
+                    try:
+                        pid, _, rusage = os.wait4(proc.pid, os.WNOHANG)
+                        assert pid == proc.pid or pid == 0
+                    except ChildProcessError:
+                        break
+
+                    if pid == proc.pid:
+                        break
+
+                    if endtime - time.monotonic() <= 0:
+                        timed_out = True
+            else:
+                try:
+                    _, _, rusage = os.wait4(proc.pid, 0)
+                except ChildProcessError:
+                    ...
+
+            stdout, stderr = proc.communicate()
+
+            if timed_out or proc.returncode != 0:
+                result = FailedProcessResult(
+                    execution=execution,
+                    stdout=stdout,
+                    stderr=stderr,
+                    rusage=rusage,
+                    returncode=proc.returncode,
+                    reason="timed_out" if timed_out else "non_zero_returncode",
                 )
-                return
+                self.error_execution(result)
+            else:
+                result = SuccesfulProcessResult(
+                    execution=execution,
+                    stdout=stdout,
+                    stderr=stderr,
+                    rusage=rusage,
+                )
 
-            self.finalize(
-                execution,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-            )
+            self.finalize(result)
 
         except OSError as e:
-            self.error_execution(execution, str(e))
+            self.error_execution(
+                FailedProcessResult(
+                    execution=execution,
+                    stdout=None,
+                    stderr=None,
+                    rusage=None,
+                    returncode=0,
+                    reason=str(e),
+                )
+            )
 
     def start_execution(self, execution: Execution) -> None:
         print(
@@ -1461,38 +1541,46 @@ class DefaultExecutor(Executor):
             end="",
         )
 
-    def error_execution(
-        self,
-        execution: Execution,
-        msg: str,
-        stdout: Optional[str] = None,
-        stderr: Optional[str] = None,
-    ):
+    def error_execution(self, process_result: FailedProcessResult):
         self.failed_executions += 1
         print(
-            f"{TUI.RED}{TUI.BOLD}Error in {execution.as_identifier()}{TUI.RESET}\n{msg}\n"
+            f"{TUI.RED}{TUI.BOLD}Error in {process_result.execution.as_identifier()}{TUI.RESET}\n"
         )
 
-        if stdout is not None or stderr is not None:
-            run_path = self.crash_folder / execution.as_identifier().replace(" ", "_")
+        if process_result.reason == "non_zero_returncode":
+            print(
+                f"Program ended with non-zero return code ({process_result.returncode})\n"
+            )
+        elif process_result.reason == "timed_out":
+            print(
+                f"Program timed out after {process_result.execution.timeout} seconds\n"
+            )
+        else:
+            print(process_result.reason + "\n")
+
+        if process_result.stdout is not None or process_result.stderr is not None:
+            run_path = (
+                self.crash_folder
+                / process_result.execution.as_identifier().replace(" ", "_")
+            )
             run_path.mkdir(parents=True, exist_ok=True)
 
-            if stdout is not None:
+            if process_result.stdout is not None:
                 with open(run_path / "stdout", "wt") as file:
-                    file.write(stdout)
+                    file.write(process_result.stdout)
 
-            if stderr is not None:
+            if process_result.stderr is not None:
                 with open(run_path / "stderr", "wt") as file:
-                    file.write(stderr)
+                    file.write(process_result.stderr)
 
             print(
                 f"{TUI.RED}stdout and stderr are saved in {str(run_path)}{TUI.RESET}\n"
             )
 
-    def finalize(self, execution: Execution, stdout: str, stderr: str) -> None:
+    def finalize(self, process_result: ProcessResult) -> None:
         self.finished_executions += 1
         self.result.measurements.extend(
-            execution.parser.parse(execution, stdout, stderr).measurements
+            process_result.execution.parser.parse(process_result).measurements
         )
 
     def __enter__(self):
@@ -1558,14 +1646,14 @@ class ParallelExecutor(DefaultExecutor):
             self.last_info = execution.as_identifier()
             self.print_execution()
 
-    def error_execution(self, execution, msg, stdout=None, stderr=None):
+    def error_execution(self, process_result: FailedProcessResult):
         with self.lock:
-            super().error_execution(execution, msg, stdout, stderr)
+            super().error_execution(process_result)
 
-    def finalize(self, execution: Execution, stdout: str, stderr: str) -> None:
+    def finalize(self, process_result: ProcessResult) -> None:
         with self.lock:
             self.in_process_runs -= 1
-            super().finalize(execution, stdout, stderr)
+            super().finalize(process_result)
             self.print_execution()
 
 
@@ -1727,6 +1815,9 @@ __all__ = [
     "Command",
     "Parameters",
     "TimeBinutilColumns",
+    "ProcessResult",
+    "SuccesfulProcessResult",
+    "FailedProcessResult",
     # Input definitions
     "Execution",
     "Benchmark",
