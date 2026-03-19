@@ -131,7 +131,9 @@ class Execution:
         A intermediate state of Execution
         """
 
-        benchmark: "Benchmark"
+        benchmark_name: str
+        data: tuple[Any, ...] | Any
+        keys: SimpleNamespace
 
         suite: str
         parser: Optional["ResultParser"]
@@ -147,21 +149,21 @@ class Execution:
         def finalize(self) -> "Execution":
             if self.parser is None:
                 raise ValueError(
-                    f"Benchmark {self.benchmark.name} in suite {self.suite} is missing a parser"
+                    f"Benchmark {self.benchmark_name} in suite {self.suite} is missing a parser"
                 )
 
             if self.working_directory is None:
                 raise ValueError(
-                    f"Benchmark {self.benchmark.name} in suite {self.suite} is missing working directory"
+                    f"Benchmark {self.benchmark_name} in suite {self.suite} is missing working directory"
                 )
 
             if self.command is None:
                 raise ValueError(
-                    f"Benchmark {self.benchmark.name} in suite {self.suite} is missing a command"
+                    f"Benchmark {self.benchmark_name} in suite {self.suite} is missing a command"
                 )
 
             return Execution(
-                benchmark_name=self.benchmark.name,
+                benchmark_name=self.benchmark_name,
                 suite=self.suite,
                 parser=self.parser,
                 command=self.command,
@@ -349,7 +351,9 @@ class BaseSuite(Suite):
             env = self.env(parameters, b)
 
             yield Execution.Incomplete(
-                benchmark=b,
+                benchmark_name=b.name,
+                data=b.data,
+                keys=b.keys,
                 suite=self.name,
                 command=command,
                 parser=self.parser,
@@ -664,7 +668,7 @@ class Config(BenchmarkCollection["Config"]):
                 if exe.parser is None:
                     if self.default_parser is None:
                         raise ValueError(
-                            f"No result parser for benchmark {exe.benchmark.name} in suite {exe.suite}"
+                            f"No result parser for benchmark {exe.benchmark_name} in suite {exe.suite}"
                         )
 
                     exe.parser = self.default_parser
@@ -672,7 +676,7 @@ class Config(BenchmarkCollection["Config"]):
                 if exe.command is None:
                     if self.default_command is None:
                         raise ValueError(
-                            f"No command for benchmark {exe.benchmark.name} in suite {exe.suite}"
+                            f"No command for benchmark {exe.benchmark_name} in suite {exe.suite}"
                         )
 
                     exe.command = self.default_command(parameters, exe)
@@ -680,7 +684,7 @@ class Config(BenchmarkCollection["Config"]):
                 if exe.working_directory is None:
                     if self.default_working_directory is None:
                         raise ValueError(
-                            f"No working directory for benchmark {exe.benchmark.name} in suite {exe.suite}"
+                            f"No working directory for benchmark {exe.benchmark_name} in suite {exe.suite}"
                         )
 
                     exe.working_directory = self.default_working_directory(
