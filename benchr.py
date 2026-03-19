@@ -1,20 +1,20 @@
 import abc
 import argparse
 import dataclasses
+import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
 from threading import Lock
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, Literal, Optional, Sequence
-import os
-import time
-import resource
+from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Sequence
 
 # --------------------------------------
 #           HELPERS
@@ -824,6 +824,59 @@ class ResultParser(abc.ABC):
     @abc.abstractmethod
     def parse(self, process_result: ProcessResult) -> ExecutionResult: ...
 
+    def ignore_fail(self) -> "ResultParser":
+        """
+        Ignore failed executions, parsing them as succesful
+        """
+        return IgnoreFailParserDecorator(self)
+
+    def note_failure(self, dummy_metric: str = "runtime") -> "ResultParser":
+        """
+        Add a column `failed` with values 1 and 0
+        """
+        return NoteFailureParserDecorator(self, dummy_metric)
+
+    def note_timeout(self, runtime_metric: str = "runtime") -> "ResultParser":
+        """
+        Add a column `timed_out` with values 1 and 0
+        """
+        return NoteTimeoutParserDecorator(self, runtime_metric)
+
+
+    def __and__(self, other) -> "ResultParser":
+        return MixedResultParser(self, other)
+
+
+class MixedResultParser(ResultParser):
+    """
+    Multiple parsers posing as one
+    """
+
+    parsers: list[ResultParser]
+
+    @staticmethod
+    def canonize(parsers: Iterable[ResultParser]) -> Iterator[ResultParser]:
+        """
+        Flatten the representation of MixedResultParser (one in another)
+        """
+        for parser in parsers:
+            if isinstance(parser, MixedResultParser):
+                for subparser in parser.parsers:
+                    yield subparser
+            else:
+                yield parser
+
+    def __init__(self, *parsers: ResultParser) -> None:
+        self.parsers = list(canon_p for canon_p in MixedResultParser.canonize(parsers))
+
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        result = ExecutionResult()
+
+        for parser in self.parsers:
+            result.measurements += parser.parse(process_result).measurements
+
+        return result
+
 
 class PlainFloatParser(ResultParser):
     """
@@ -1070,25 +1123,6 @@ class RebenchParser(ResultParser):
         return result
 
 
-class MixedResultParser(ResultParser):
-    """
-    Multiple parsers posing as one
-    """
-
-    parsers: list[ResultParser]
-
-    def __init__(self, *parsers: ResultParser) -> None:
-        self.parsers = list(parsers)
-
-    def parse(self, process_result: ProcessResult) -> ExecutionResult:
-        result = ExecutionResult()
-
-        for parser in self.parsers:
-            result.measurements += parser.parse(process_result).measurements
-
-        return result
-
-
 class ClockTimeParser(ResultParser):
     """
     Capture the outer runtime of a process
@@ -1204,6 +1238,107 @@ def resource_usage_parser(*columns: ResourceMetric) -> ResultParser:
         return parsers[0]
 
     return MixedResultParser(*parsers)
+
+
+# --------------------------------------
+#           PARSER DECORATORS
+# --------------------------------------
+
+
+class IgnoreFailParserDecorator(ResultParser):
+    subparser: ResultParser
+
+    def __init__(self, subparser: ResultParser) -> None:
+        self.subparser = subparser
+
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        if isinstance(process_result, FailedProcessResult):
+            process_result = SuccesfulProcessResult(
+                execution=process_result.execution,
+                runtime=process_result.runtime or -1,
+                stdout=process_result.stdout or "",
+                stderr=process_result.stderr or "",
+                rusage=process_result.rusage,
+            )
+
+        return self.subparser.parse(process_result)
+
+
+def add_measurement_note(
+    result: ExecutionResult, info: dict[str, str], dummy_measurement: Measurement
+) -> ExecutionResult:
+    if len(result.measurements) == 0:
+        result.measurements.append(dummy_measurement)
+    else:
+        for m in result.measurements:
+            m.measurement_info |= info
+
+    return result
+
+
+class NoteFailureParserDecorator(ResultParser):
+    subparser: ResultParser
+    dummy_metric: str
+
+    def __init__(self, subparser: ResultParser, dummy_metric: str = "runtime") -> None:
+        self.subparser = subparser
+        self.dummy_metric = dummy_metric
+
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        result = self.subparser.parse(process_result)
+
+        failed = 1 if isinstance(process_result, FailedProcessResult) else 0
+
+        return add_measurement_note(
+            result,
+            {"failed": str(failed)},
+            Measurement(
+                execution=process_result.execution,
+                metric=self.dummy_metric,
+                value=0,
+                unit="",
+                measurement_info={"failed": str(failed)},
+            ),
+        )
+
+
+class NoteTimeoutParserDecorator(ResultParser):
+    subparser: ResultParser
+    runtime_metric: str
+
+    def __init__(
+        self, subparser: ResultParser, runtime_metric: str = "runtime"
+    ) -> None:
+        self.subparser = subparser
+        self.runtime_metric = runtime_metric
+
+    def parse(self, process_result: ProcessResult) -> ExecutionResult:
+        result = self.subparser.parse(process_result)
+
+        timed_out = (
+            1
+            if isinstance(process_result, FailedProcessResult)
+            and process_result.reason == "timed_out"
+            else 0
+        )
+
+        dummy_measure = Measurement(
+            execution=process_result.execution,
+            metric=self.runtime_metric,
+            value=process_result.execution.timeout or 0,
+            unit="s",
+            measurement_info={"timed_out": str(timed_out)},
+        )
+
+        result = add_measurement_note(
+            result, {"timed_out": str(timed_out)}, dummy_measure
+        )
+
+        # If there is no measurement of the `runtime_metric`, add the dummy_measure
+        if not any(map(lambda m: m.metric == self.runtime_metric, result.measurements)):
+            result.measurements.append(dummy_measure)
+
+        return result
 
 
 # --------------------------------------
@@ -1876,14 +2011,18 @@ __all__ = [
     "ExecutionResult",
     # Parsers
     "ResultParser",
+    "MixedResultParser",
     "PlainFloatParser",
     "LastLineParser",
     "RegexParser",
     "RebenchParser",
-    "MixedResultParser",
     "ClockTimeParser",
     "ResourceUsageParser",
     "resource_usage_parser",
+    # Parser decorators
+    "IgnoreFailParserDecorator",
+    "NoteFailureParserDecorator",
+    "NoteTimeoutParserDecorator",
     # Reporters
     "Reporter",
     "MixedReporter",
