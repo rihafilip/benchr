@@ -815,7 +815,12 @@ class ExecutionResult:
         index_cols = ["benchmark", "suite"] + info_cols + measurement_info_cols
 
         df = pd.DataFrame(rows)
-        df.set_index(index_cols, inplace=True)
+        if pivoted:
+            df = df.groupby(index_cols).agg(
+                lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else float("nan")
+            )
+        else:
+            df.set_index(index_cols, inplace=True)
         return df
 
 
