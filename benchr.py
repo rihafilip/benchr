@@ -1156,7 +1156,7 @@ class ClockTimeParser(ResultParser):
         )
 
 
-class ResourceUsageParser(ResultParser):
+class SingleResourceUsageParser(ResultParser):
     RUsageField = Literal[
         "ru_utime",
         "ru_stime",
@@ -1208,7 +1208,7 @@ class ResourceUsageParser(ResultParser):
         )
 
 
-def resource_usage_parser(*columns: ResourceMetric) -> ResultParser:
+def ResourceUsageParser(*columns: ResourceMetric) -> ResultParser:
     """
     Create a parser for resourece metrics
     """
@@ -1217,7 +1217,7 @@ def resource_usage_parser(*columns: ResourceMetric) -> ResultParser:
     for col in columns:
         if col == "maximum_resident_size":
             parsers.append(
-                ResourceUsageParser(
+                SingleResourceUsageParser(
                     "ru_maxrss",
                     "maximum_resident_size",
                     "kB",
@@ -1226,7 +1226,7 @@ def resource_usage_parser(*columns: ResourceMetric) -> ResultParser:
 
         elif col == "user_time":
             parsers.append(
-                ResourceUsageParser(
+                SingleResourceUsageParser(
                     "ru_utime",
                     "user_time",
                     "s",
@@ -1235,7 +1235,7 @@ def resource_usage_parser(*columns: ResourceMetric) -> ResultParser:
 
         elif col == "system_time":
             parsers.append(
-                ResourceUsageParser(
+                SingleResourceUsageParser(
                     "ru_stime",
                     "system_time",
                     "s",
@@ -2056,8 +2056,8 @@ __all__ = [
     "RegexParser",
     "RebenchParser",
     "ClockTimeParser",
+    "SingleResourceUsageParser",
     "ResourceUsageParser",
-    "resource_usage_parser",
     # Parser decorators
     "IgnoreFailParserDecorator",
     "NoteFailureParserDecorator",

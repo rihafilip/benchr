@@ -43,7 +43,7 @@ conf = (
                 ),
                 parser=(
                     LastLineParser(PlainFloatParser("s"))
-                    & resource_usage_parser("maximum_resident_size")
+                    & ResourceUsageParser("maximum_resident_size")
                     & ClockTimeParser()
                 )
                 .kind("LIB")
